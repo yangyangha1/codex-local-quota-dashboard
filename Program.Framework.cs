@@ -67,9 +67,9 @@ namespace CodexLocalDashboard
         private readonly QuotaStripPanel stripPanel = new QuotaStripPanel();
         private readonly Form taskbarOwner = new Form();
         private readonly Dictionary<Control, LayoutSpec> layout = new Dictionary<Control, LayoutSpec>();
-        private readonly Label quotaTitle = Ui.Label("最近限额快照", 9, FontStyle.Regular, Color.FromArgb(142, 153, 169));
+        private readonly Label quotaTitle = Ui.Label("最近限额快照", 9, FontStyle.Bold, Color.FromArgb(142, 153, 169));
         private readonly Label quotaValue = Ui.Label("读取中…", 26, FontStyle.Bold, Color.White);
-        private readonly Label quotaSub = Ui.Label("正在扫描本地日志", 8, FontStyle.Regular, Color.FromArgb(142, 153, 169));
+        private readonly Label quotaSub = Ui.Label("正在扫描本地日志", 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
         private readonly Label todayValue = Ui.Metric("—");
         private readonly Label weekValue = Ui.Metric("—");
         private readonly Label monthValue = Ui.Metric("—");
@@ -200,14 +200,14 @@ namespace CodexLocalDashboard
 
         private void AddMetric(string caption, Label value, int x)
         {
-            var label = Ui.Label(caption, 8, FontStyle.Regular, Color.FromArgb(126, 137, 153));
+            var label = Ui.Label(caption, 8, FontStyle.Bold, Color.FromArgb(126, 137, 153));
             Add(label, x, 102, 94, 18);
             Add(value, x, 120, 94, 32);
         }
 
         private void AddDetail(string caption, Label value, int x, int y)
         {
-            var label = Ui.Label(caption, 8, FontStyle.Regular, Color.FromArgb(126, 137, 153));
+            var label = Ui.Label(caption, 8, FontStyle.Bold, Color.FromArgb(126, 137, 153));
             Add(label, x, y, 94, 18);
             Add(value, x, y + 19, 94, 27);
         }
@@ -362,7 +362,7 @@ namespace CodexLocalDashboard
             var light = mode == ThemeMode.Light || mode == ThemeMode.Transparent;
             var transparent = mode == ThemeMode.Transparent;
             var transparentKey = Color.FromArgb(250, 250, 250);
-            var background = transparent ? transparentKey : (light ? Color.FromArgb(244, 246, 249) : Color.FromArgb(18, 21, 28));
+            var background = transparent ? transparentKey : (light ? Color.FromArgb(236, 245, 250) : Color.FromArgb(26, 34, 37));
             var primary = light ? Color.Black : Color.FromArgb(242, 245, 249);
             var muted = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(142, 153, 169);
             var divider = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
@@ -376,7 +376,7 @@ namespace CodexLocalDashboard
             foreach (Control control in canvas.Controls)
             {
                 var label = control as SmoothLabel;
-                if (label != null) label.ForeColor = label.Font.Bold ? primary : muted;
+                if (label != null) label.ForeColor = label.Font.Size <= 9f && label != quotaValue ? muted : primary;
                 var line = control as Panel;
                 if (line != null) line.BackColor = divider;
             }
@@ -611,7 +611,8 @@ namespace CodexLocalDashboard
         public SmoothLabel() { SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true); }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            var form = FindForm();
+            e.Graphics.TextRenderingHint = form != null && form.TransparencyKey != Color.Empty ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAliasGridFit;
             using (var brush = new SolidBrush(ForeColor))
             using (var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.None })
                 e.Graphics.DrawString(Text, Font, brush, ClientRectangle, format);
@@ -653,7 +654,7 @@ namespace CodexLocalDashboard
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.AntiAliasGridFit : TextRenderingHint.ClearTypeGridFit;
+            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAliasGridFit;
             e.Graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
