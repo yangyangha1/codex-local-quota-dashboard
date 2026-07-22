@@ -311,7 +311,7 @@ namespace CodexLocalDashboard
             }
             quotaTitle.Text = Ui.WindowName(q.WindowMinutes) + " · 缓存快照";
             quotaValue.Text = string.Format("剩余 {0:0.#}%", Math.Max(0, 100 - q.UsedPercent));
-            quotaBar.Value = Math.Max(0, Math.Min(100, (int)Math.Round(q.UsedPercent)));
+            quotaBar.Value = Math.Max(0, Math.Min(100, (int)Math.Round(100 - q.UsedPercent)));
             var reset = q.ResetsAt.HasValue ? q.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm") : "未知";
             quotaSub.Text = string.Format("已用 {0:0.#}% · 重置 {1} · {2:HH:mm:ss}", q.UsedPercent, reset, s.QuotaAt.ToLocalTime());
             tips.SetToolTip(quotaTitle, string.Join("\n", s.Quotas.OrderBy(x => x.WindowMinutes).Select(x => Ui.WindowName(x.WindowMinutes) + "：已用 " + x.UsedPercent.ToString("0.#") + "%")));
