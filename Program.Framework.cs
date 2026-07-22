@@ -361,7 +361,8 @@ namespace CodexLocalDashboard
             themeMode = mode;
             var light = mode == ThemeMode.Light || mode == ThemeMode.Transparent;
             var transparent = mode == ThemeMode.Transparent;
-            var background = transparent ? Color.Magenta : (light ? Color.FromArgb(244, 246, 249) : Color.FromArgb(18, 21, 28));
+            var transparentKey = Color.FromArgb(250, 250, 250);
+            var background = transparent ? transparentKey : (light ? Color.FromArgb(244, 246, 249) : Color.FromArgb(18, 21, 28));
             var primary = light ? Color.Black : Color.FromArgb(242, 245, 249);
             var muted = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(142, 153, 169);
             var divider = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
@@ -370,7 +371,7 @@ namespace CodexLocalDashboard
             stripPanel.BackColor = background;
             stripPanel.Theme = mode;
             Opacity = 1.0;
-            TransparencyKey = transparent ? Color.Magenta : Color.Empty;
+            TransparencyKey = transparent ? transparentKey : Color.Empty;
 
             foreach (Control control in canvas.Controls)
             {
@@ -610,8 +611,7 @@ namespace CodexLocalDashboard
         public SmoothLabel() { SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true); }
         protected override void OnPaint(PaintEventArgs e)
         {
-            var form = FindForm();
-            e.Graphics.TextRenderingHint = form != null && form.TransparencyKey != Color.Empty ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAliasGridFit;
+            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             using (var brush = new SolidBrush(ForeColor))
             using (var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.None })
                 e.Graphics.DrawString(Text, Font, brush, ClientRectangle, format);
@@ -653,7 +653,7 @@ namespace CodexLocalDashboard
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.ClearTypeGridFit;
+            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.AntiAliasGridFit : TextRenderingHint.ClearTypeGridFit;
             e.Graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
