@@ -8,6 +8,20 @@
 
 **核心特点：只读取本地日志，完全不联网。** 程序不会调用 OpenAI 或其他在线额度接口，也不会上传提示词、会话内容或用量数据。
 
+## 界面预览
+
+**桌面仪表盘**
+
+<p align="center">
+  <img src="docs/images/dashboard.jpg" width="520" alt="Codex Local Quota Dashboard desktop dashboard">
+</p>
+
+**Codex 顶部横条**
+
+<p align="center">
+  <img src="docs/images/top-strip.jpg" alt="Codex Local Quota Dashboard top strip attached to Codex">
+</p>
+
 ## 快速使用
 
 1. 从 [Releases](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/latest) 获取 `CodexLocalQuotaDashboard-v1.0.0.exe`。
