@@ -362,15 +362,16 @@ namespace CodexLocalDashboard
             var light = mode == ThemeMode.Light || mode == ThemeMode.Transparent;
             var transparent = mode == ThemeMode.Transparent;
             var transparentKey = Color.FromArgb(250, 250, 250);
-            var background = transparent ? transparentKey : (light ? Color.FromArgb(236, 245, 250) : Color.FromArgb(26, 34, 37));
+            var dashboardBackground = transparent ? transparentKey : (light ? Color.FromArgb(236, 245, 250) : Color.FromArgb(26, 34, 37));
+            var stripBackground = transparent ? transparentKey : (light ? Color.FromArgb(250, 247, 238) : Color.FromArgb(36, 36, 36));
             var primary = light ? Color.Black : Color.FromArgb(242, 245, 249);
             var muted = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(142, 153, 169);
             var divider = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
-            BackColor = background;
-            canvas.BackColor = background;
-            stripPanel.BackColor = background;
+            BackColor = stripMode ? stripBackground : dashboardBackground;
+            canvas.BackColor = dashboardBackground;
+            stripPanel.BackColor = stripBackground;
             stripPanel.Theme = mode;
-            Opacity = 1.0;
+            Opacity = stripMode && !transparent ? 0.70 : 1.0;
             TransparencyKey = transparent ? transparentKey : Color.Empty;
 
             foreach (Control control in canvas.Controls)
@@ -436,6 +437,7 @@ namespace CodexLocalDashboard
             stripPanel.Visible = true;
             stripPanel.Snapshot = latestSnapshot;
             stripPanel.Theme = themeMode;
+            ApplyTheme(themeMode);
             switchModeItem.Text = "切换为桌面仪表盘";
             codexWindow = IntPtr.Zero;
             followTimer.Start();
@@ -451,6 +453,7 @@ namespace CodexLocalDashboard
             codexWindow = IntPtr.Zero;
             stripPanel.Visible = false;
             canvas.Visible = true;
+            ApplyTheme(themeMode);
             ShowInTaskbar = false;
             MinimumSize = DpiSize(256, 180);
             MaximumSize = DpiSize(576, 405);
