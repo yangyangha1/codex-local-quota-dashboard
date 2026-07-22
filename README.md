@@ -4,7 +4,17 @@
   <img src="dashboard-icon-master.png" width="112" alt="Codex Local Quota Dashboard icon">
 </p>
 
-一个面向 Windows 的轻量桌面仪表盘，只读取本机 Codex 会话日志，显示最近缓存的额度快照和本地 Token 使用统计。程序不调用在线额度接口，也不会上传会话内容。
+一个面向 Windows 的 Codex 额度与 Token 用量仪表盘。下载 EXE 后直接运行，程序会自动读取本机 `.codex` 会话日志，显示最近缓存的额度、重置时间和本地 Token 统计；无需填写账号、API Key 或进行任何配置。
+
+**核心特点：只读取本地日志，完全不联网。** 程序不会调用 OpenAI 或其他在线额度接口，也不会上传提示词、会话内容或用量数据。
+
+## 快速使用
+
+1. 从 [Releases](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/latest) 获取 `CodexLocalQuotaDashboard-v1.0.0.exe`。
+2. 双击运行，程序会自动扫描 `%USERPROFILE%\.codex\sessions` 和 `archived_sessions`，无需安装和登录。
+3. 仪表盘会显示最近的本地额度快照，以及今日、近 7 天和近 30 天 Token 用量。
+4. 在仪表盘任意位置点击右键，可切换为 Codex 顶部横条、选择深色/浅色/透明外观、设置置顶或开机启动。
+5. 拖动仪表盘内容可移动窗口；拖动边缘或四角可整体缩放。
 
 ## 功能特点
 
@@ -30,13 +40,6 @@
 - Windows 10 或 Windows 11
 - .NET Framework 4.8
 - 已使用过 Codex，并存在本地 `.codex` 会话日志
-
-## 安装与使用
-
-1. 从 [Releases](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/latest) 获取 `CodexLocalQuotaDashboard-v1.0.0.exe`。
-2. 将程序放到任意目录并直接运行，无需安装。
-3. 在仪表盘任意位置点击右键，可切换显示模式、外观、置顶和开机启动。
-4. 拖动仪表盘内容可移动窗口；拖动窗口边缘或四角可整体缩放。
 
 ## 从源码编译
 
