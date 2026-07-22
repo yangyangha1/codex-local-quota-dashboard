@@ -65,6 +65,7 @@ namespace CodexLocalDashboard
         private readonly ToolTip tips = new ToolTip();
         private readonly Panel canvas = new Panel();
         private readonly QuotaStripPanel stripPanel = new QuotaStripPanel();
+        private readonly Form taskbarOwner = new Form();
         private readonly Dictionary<Control, LayoutSpec> layout = new Dictionary<Control, LayoutSpec>();
         private readonly Label quotaTitle = Ui.Label("最近限额快照", 9, FontStyle.Regular, Color.FromArgb(142, 153, 169));
         private readonly Label quotaValue = Ui.Label("读取中…", 26, FontStyle.Bold, Color.White);
@@ -112,6 +113,13 @@ namespace CodexLocalDashboard
             DoubleBuffered = true;
             AutoScaleMode = AutoScaleMode.None;
             Font = new Font("Microsoft YaHei UI", 9f);
+            taskbarOwner.ShowInTaskbar = false;
+            taskbarOwner.FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            taskbarOwner.Opacity = 0;
+            taskbarOwner.Size = new Size(1, 1);
+            taskbarOwner.StartPosition = FormStartPosition.Manual;
+            taskbarOwner.Location = new Point(-32000, -32000);
+            HandleCreated += delegate { EnsureHiddenFromTaskbar(); };
 
             canvas.Size = new Size(DesignWidth, DesignHeight);
             canvas.BackColor = BackColor;
@@ -354,7 +362,7 @@ namespace CodexLocalDashboard
             var light = mode == ThemeMode.Light || mode == ThemeMode.Transparent;
             var transparent = mode == ThemeMode.Transparent;
             var background = transparent ? Color.Magenta : (light ? Color.FromArgb(244, 246, 249) : Color.FromArgb(18, 21, 28));
-            var primary = light ? Color.FromArgb(31, 36, 45) : Color.FromArgb(242, 245, 249);
+            var primary = light ? Color.Black : Color.FromArgb(242, 245, 249);
             var muted = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(142, 153, 169);
             var divider = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
             BackColor = background;
@@ -401,9 +409,10 @@ namespace CodexLocalDashboard
         private void ShowCurrentMode() { if (stripMode) { codexWindow = IntPtr.Zero; FollowCodex(); } else ShowDashboard(); }
         private void ShowDashboard()
         {
-            ShowInTaskbar = false;
+            EnsureHiddenFromTaskbar();
             Show();
             WindowState = FormWindowState.Normal;
+            EnsureHiddenFromTaskbar();
             Activate();
         }
 
@@ -436,7 +445,7 @@ namespace CodexLocalDashboard
         {
             followTimer.Stop();
             stripMode = false;
-            if (ownedCodexWindow != IntPtr.Zero) SetWindowLongPtr(Handle, GWL_HWNDPARENT, IntPtr.Zero);
+            if (ownedCodexWindow != IntPtr.Zero) SetWindowLongPtr(Handle, GWL_HWNDPARENT, taskbarOwner.Handle);
             ownedCodexWindow = IntPtr.Zero;
             codexWindow = IntPtr.Zero;
             stripPanel.Visible = false;
@@ -479,12 +488,15 @@ namespace CodexLocalDashboard
             {
                 SetWindowLongPtr(Handle, GWL_HWNDPARENT, codexWindow);
                 ownedCodexWindow = codexWindow;
+                EnsureHiddenFromTaskbar();
             }
 
             RECT rect;
             if (DwmGetWindowAttributeRect(codexWindow, 9, out rect, Marshal.SizeOf(typeof(RECT))) != 0 && !GetWindowRect(codexWindow, out rect)) return;
             var targetWidth = rect.Right - rect.Left;
-            var logicalWidth = Math.Max(280, Math.Min(360, targetWidth / dpiScale - 320));
+            var availableLogicalWidth = Math.Max(280, targetWidth / dpiScale - 220);
+            var preferredLogicalWidth = stripPanel.GetPreferredLogicalWidth();
+            var logicalWidth = Math.Max(280, Math.Min(Math.Min(520, availableLogicalWidth), preferredLogicalWidth));
             var width = (int)Math.Round(logicalWidth * dpiScale);
             var height = (int)Math.Round(24 * dpiScale);
             var x = rect.Left + (targetWidth - width) / 2;
@@ -529,13 +541,30 @@ namespace CodexLocalDashboard
             var area = Screen.PrimaryScreen.WorkingArea; Location = new Point(area.Right - Width - 24, area.Top + 42);
         }
         private void SavePosition() { try { Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)); File.WriteAllText(SettingsPath, Left + "," + Top + "," + ClientSize.Width + "," + ClientSize.Height); } catch { } }
+        private void EnsureHiddenFromTaskbar()
+        {
+            ShowInTaskbar = false;
+            if (!IsHandleCreated) return;
+            var style = GetWindowLongPtr(Handle, GWL_EXSTYLE).ToInt64();
+            style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+            SetWindowLongPtr(Handle, GWL_EXSTYLE, new IntPtr(style));
+            if (!stripMode) SetWindowLongPtr(Handle, GWL_HWNDPARENT, taskbarOwner.Handle);
+            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
         private static bool IsStartupEnabled() { using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) return key != null && key.GetValue("CodexLocalDashboard") != null; }
         private static void SetStartup(bool enabled) { using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) { if (enabled) key.SetValue("CodexLocalDashboard", "\"" + Application.ExecutablePath + "\""); else key.DeleteValue("CodexLocalDashboard", false); } }
-        private void OnClosing(object sender, FormClosingEventArgs e) { if (!exiting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); return; } tray.Visible = false; if (!stripMode) SavePosition(); }
+        private void OnClosing(object sender, FormClosingEventArgs e) { if (!exiting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); return; } tray.Visible = false; if (!stripMode) SavePosition(); taskbarOwner.Dispose(); }
 
         private const uint SWP_NOACTIVATE = 0x0010;
         private const uint SWP_SHOWWINDOW = 0x0040;
+        private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_NOZORDER = 0x0004;
+        private const uint SWP_FRAMECHANGED = 0x0020;
         private const int GWL_HWNDPARENT = -8;
+        private const int GWL_EXSTYLE = -20;
+        private const long WS_EX_TOOLWINDOW = 0x00000080L;
+        private const long WS_EX_APPWINDOW = 0x00040000L;
         private static readonly IntPtr HWND_TOP = IntPtr.Zero;
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT { public int Left, Top, Right, Bottom; }
@@ -555,6 +584,8 @@ namespace CodexLocalDashboard
         private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
         [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
         private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
+        private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
         [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
         private static extern int DwmGetWindowAttributeRect(IntPtr hwnd, int attribute, out RECT value, int size);
     }
@@ -598,10 +629,31 @@ namespace CodexLocalDashboard
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
         }
 
+        public int GetPreferredLogicalWidth()
+        {
+            var scale = Math.Max(1f, DpiScale);
+            using (var font = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular))
+            {
+                var data = Snapshot;
+                var leftText = "等待本地限额快照";
+                var resetText = "重置日期：未知";
+                if (data != null && data.Quotas.Count > 0)
+                {
+                    var quota = data.Quotas.OrderBy(x => x.WindowMinutes).First();
+                    leftText = string.Format("{0}剩余：{1:0.#}%", ShortWindowName(quota.WindowMinutes), Math.Max(0, 100 - quota.UsedPercent));
+                    resetText = quota.ResetsAt.HasValue ? "重置日期：" + quota.ResetsAt.Value.ToLocalTime().ToString("M月d日") : "重置日期：未知";
+                }
+                var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+                var leftWidth = TextRenderer.MeasureText(leftText, font, Size.Empty, flags).Width;
+                var resetWidth = TextRenderer.MeasureText(resetText, font, Size.Empty, flags).Width;
+                return Math.Max(280, (int)Math.Ceiling((7 * scale + leftWidth + 5 * scale + 110 * scale + 4 * scale + resetWidth + 6 * scale) / scale));
+            }
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.AntiAliasGridFit : TextRenderingHint.ClearTypeGridFit;
+            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.ClearTypeGridFit;
             e.Graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
@@ -610,12 +662,13 @@ namespace CodexLocalDashboard
             var light = Theme == ThemeMode.Light || Theme == ThemeMode.Transparent;
             var primaryColor = light ? Color.FromArgb(31, 36, 45) : Color.FromArgb(242, 245, 249);
             var mutedColor = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(151, 161, 177);
+            var menuTextColor = light ? Color.FromArgb(117, 117, 117) : Color.FromArgb(174, 174, 174);
             var trackColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(55, 61, 73);
             var data = Snapshot;
             if (data == null || data.Quotas.Count == 0)
             {
-                using (var font = new Font("Microsoft YaHei", 9f, FontStyle.Regular))
-                using (var brush = new SolidBrush(mutedColor))
+                using (var font = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular))
+                using (var brush = new SolidBrush(menuTextColor))
                 using (var waitingFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
                     e.Graphics.DrawString("等待本地限额快照", font, brush, new RectangleF(8 * scale, 0, ClientSize.Width - 16 * scale, ClientSize.Height), waitingFormat);
                 return;
@@ -623,25 +676,29 @@ namespace CodexLocalDashboard
 
             var quota = data.Quotas.OrderBy(x => x.WindowMinutes).First();
             var remaining = Math.Max(0, 100 - quota.UsedPercent);
-            var reset = quota.ResetsAt.HasValue ? "重置：" + quota.ResetsAt.Value.ToLocalTime().ToString("M-d") : "重置：未知";
-            var resetWidth = 88 * scale;
-            var progressX = 120 * scale;
-            var progressRight = ClientSize.Width - resetWidth;
-            var progressWidth = Math.Max(20 * scale, progressRight - progressX - 7 * scale);
+            var reset = quota.ResetsAt.HasValue ? "重置日期：" + quota.ResetsAt.Value.ToLocalTime().ToString("M月d日") : "重置日期：未知";
             var progressHeight = Math.Max(3f, 4 * scale);
             var progressY = (ClientSize.Height - progressHeight) / 2f;
 
-            using (var normal = new Font("Microsoft YaHei", 9f, FontStyle.Regular))
+            using (var normal = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular))
             using (var muted = new SolidBrush(mutedColor))
-            using (var white = new SolidBrush(primaryColor))
+            using (var menuText = new SolidBrush(menuTextColor))
             using (var track = new SolidBrush(trackColor))
             using (var accent = new SolidBrush(Color.FromArgb(81, 201, 142)))
             using (var centered = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter })
             {
-                e.Graphics.DrawString(string.Format("{0}剩余{1:0.#}%", ShortWindowName(quota.WindowMinutes), remaining), normal, white, new RectangleF(7 * scale, 0, 111 * scale, ClientSize.Height), centered);
+                var leftText = string.Format("{0}剩余：{1:0.#}%", ShortWindowName(quota.WindowMinutes), remaining);
+                var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+                var leftWidth = TextRenderer.MeasureText(leftText, normal, Size.Empty, flags).Width;
+                var resetTextWidth = TextRenderer.MeasureText(reset, normal, Size.Empty, flags).Width;
+                var leftX = 7 * scale;
+                var progressX = leftX + leftWidth + 5 * scale;
+                var resetX = ClientSize.Width - resetTextWidth - 5 * scale;
+                var progressWidth = Math.Max(20 * scale, resetX - progressX - 4 * scale);
+                e.Graphics.DrawString(leftText, normal, menuText, new RectangleF(leftX, 0, leftWidth + 2 * scale, ClientSize.Height), centered);
                 e.Graphics.FillRectangle(track, progressX, progressY, progressWidth, progressHeight);
                 e.Graphics.FillRectangle(accent, progressX, progressY, (float)(progressWidth * remaining / 100d), progressHeight);
-                e.Graphics.DrawString(reset, normal, muted, new RectangleF(ClientSize.Width - resetWidth + 5 * scale, 0, resetWidth - 8 * scale, ClientSize.Height), centered);
+                e.Graphics.DrawString(reset, normal, menuText, new RectangleF(resetX, 0, resetTextWidth + 2 * scale, ClientSize.Height), centered);
             }
         }
 
