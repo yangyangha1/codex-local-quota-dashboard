@@ -488,7 +488,7 @@ namespace CodexLocalDashboard
             var width = (int)Math.Round(logicalWidth * dpiScale);
             var height = (int)Math.Round(24 * dpiScale);
             var x = rect.Left + (targetWidth - width) / 2;
-            var y = rect.Top + (int)Math.Round(2 * dpiScale);
+            var y = rect.Top + (int)Math.Round(7 * dpiScale);
             if (!Visible) Show();
             SetWindowPos(Handle, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
@@ -620,9 +620,9 @@ namespace CodexLocalDashboard
 
             var quota = data.Quotas.OrderBy(x => x.WindowMinutes).First();
             var remaining = Math.Max(0, 100 - quota.UsedPercent);
-            var reset = quota.ResetsAt.HasValue ? quota.ResetsAt.Value.ToLocalTime().ToString("M-d HH:mm") : "未知";
-            var resetWidth = 96 * scale;
-            var progressX = 150 * scale;
+            var reset = quota.ResetsAt.HasValue ? "重置：" + quota.ResetsAt.Value.ToLocalTime().ToString("M-d") : "重置：未知";
+            var resetWidth = 88 * scale;
+            var progressX = 120 * scale;
             var progressRight = ClientSize.Width - resetWidth;
             var progressWidth = Math.Max(20 * scale, progressRight - progressX - 7 * scale);
             var progressHeight = Math.Max(3f, 4 * scale);
@@ -636,8 +636,8 @@ namespace CodexLocalDashboard
             using (var accent = new SolidBrush(Color.FromArgb(81, 201, 142)))
             using (var centered = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter })
             {
-                e.Graphics.DrawString(ShortWindowName(quota.WindowMinutes), normal, muted, new RectangleF(7 * scale, 0, 48 * scale, ClientSize.Height), centered);
-                e.Graphics.DrawString(string.Format("剩余 {0:0.#}%", remaining), emphasis, white, new RectangleF(57 * scale, 0, 91 * scale, ClientSize.Height), centered);
+                e.Graphics.DrawString(ShortWindowName(quota.WindowMinutes), normal, muted, new RectangleF(7 * scale, 0, 30 * scale, ClientSize.Height), centered);
+                e.Graphics.DrawString(string.Format("剩余 {0:0.#}%", remaining), emphasis, white, new RectangleF(39 * scale, 0, 79 * scale, ClientSize.Height), centered);
                 e.Graphics.FillRectangle(track, progressX, progressY, progressWidth, progressHeight);
                 e.Graphics.FillRectangle(accent, progressX, progressY, (float)(progressWidth * remaining / 100d), progressHeight);
                 e.Graphics.DrawString(reset, normal, muted, new RectangleF(ClientSize.Width - resetWidth + 5 * scale, 0, resetWidth - 8 * scale, ClientSize.Height), centered);
