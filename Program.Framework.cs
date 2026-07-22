@@ -314,7 +314,11 @@ namespace CodexLocalDashboard
             tray.Text = "Codex 本地用量";
             tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
             tray.Visible = true;
-            tray.DoubleClick += delegate { ShowCurrentMode(); };
+            tray.MouseClick += delegate(object sender, MouseEventArgs e)
+            {
+                if (e.Button != MouseButtons.Left) return;
+                if (stripMode) ExitStripMode(); else ShowDashboard();
+            };
             var menu = new ContextMenuStrip();
             switchModeItem = new ToolStripMenuItem("切换为 Codex 顶部横条");
             switchModeItem.Click += delegate { ToggleDisplayMode(); };
@@ -395,7 +399,13 @@ namespace CodexLocalDashboard
         }
 
         private void ShowCurrentMode() { if (stripMode) { codexWindow = IntPtr.Zero; FollowCodex(); } else ShowDashboard(); }
-        private void ShowDashboard() { Show(); WindowState = FormWindowState.Normal; Activate(); }
+        private void ShowDashboard()
+        {
+            ShowInTaskbar = false;
+            Show();
+            WindowState = FormWindowState.Normal;
+            Activate();
+        }
 
         private void ToggleDisplayMode()
         {
@@ -431,6 +441,7 @@ namespace CodexLocalDashboard
             codexWindow = IntPtr.Zero;
             stripPanel.Visible = false;
             canvas.Visible = true;
+            ShowInTaskbar = false;
             MinimumSize = DpiSize(256, 180);
             MaximumSize = DpiSize(576, 405);
             if (!dashboardBounds.IsEmpty) Bounds = dashboardBounds;
@@ -590,7 +601,7 @@ namespace CodexLocalDashboard
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAliasGridFit;
+            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.ClearTypeGridFit;
             e.Graphics.Clear(BackColor);
             var scale = Math.Max(1f, DpiScale);
             var light = Theme == ThemeMode.Light || Theme == ThemeMode.Transparent;
@@ -600,9 +611,10 @@ namespace CodexLocalDashboard
             var data = Snapshot;
             if (data == null || data.Quotas.Count == 0)
             {
-                using (var font = new Font("Microsoft YaHei UI", 8, FontStyle.Regular))
+                using (var font = new Font(SystemFonts.MenuFont.FontFamily, SystemFonts.MenuFont.Size, FontStyle.Regular))
                 using (var brush = new SolidBrush(mutedColor))
-                    e.Graphics.DrawString("等待本地限额快照", font, brush, 8 * scale, 3 * scale);
+                using (var waitingFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
+                    e.Graphics.DrawString("等待本地限额快照", font, brush, new RectangleF(8 * scale, 0, ClientSize.Width - 16 * scale, ClientSize.Height), waitingFormat);
                 return;
             }
 
@@ -616,8 +628,8 @@ namespace CodexLocalDashboard
             var progressHeight = Math.Max(3f, 4 * scale);
             var progressY = (ClientSize.Height - progressHeight) / 2f;
 
-            using (var normal = new Font("Microsoft YaHei UI", 9f, FontStyle.Regular))
-            using (var bold = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold))
+            using (var normal = new Font(SystemFonts.MenuFont.FontFamily, SystemFonts.MenuFont.Size, FontStyle.Regular))
+            using (var emphasis = new Font(SystemFonts.MenuFont.FontFamily, SystemFonts.MenuFont.Size, FontStyle.Regular))
             using (var muted = new SolidBrush(mutedColor))
             using (var white = new SolidBrush(primaryColor))
             using (var track = new SolidBrush(trackColor))
@@ -625,7 +637,7 @@ namespace CodexLocalDashboard
             using (var centered = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter })
             {
                 e.Graphics.DrawString(ShortWindowName(quota.WindowMinutes), normal, muted, new RectangleF(7 * scale, 0, 48 * scale, ClientSize.Height), centered);
-                e.Graphics.DrawString(string.Format("剩余 {0:0.#}%", remaining), bold, white, new RectangleF(57 * scale, 0, 91 * scale, ClientSize.Height), centered);
+                e.Graphics.DrawString(string.Format("剩余 {0:0.#}%", remaining), emphasis, white, new RectangleF(57 * scale, 0, 91 * scale, ClientSize.Height), centered);
                 e.Graphics.FillRectangle(track, progressX, progressY, progressWidth, progressHeight);
                 e.Graphics.FillRectangle(accent, progressX, progressY, (float)(progressWidth * remaining / 100d), progressHeight);
                 e.Graphics.DrawString(reset, normal, muted, new RectangleF(ClientSize.Width - resetWidth + 5 * scale, 0, resetWidth - 8 * scale, ClientSize.Height), centered);
