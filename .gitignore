@@ -1,0 +1,16 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.exe
+*.new.exe
+
+# Generated icon working files
+dashboard-icon-source.png
+dashboard-icon.png
+dashboard-icon-v*.png
+dashboard-icon-*-source.png
+dashboard-icon-16-preview.png
+dashboard-icon-16px-preview.png
+build_icon.py
