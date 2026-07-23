@@ -21,8 +21,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace CodexLocalDashboard
 {

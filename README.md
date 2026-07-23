@@ -24,7 +24,7 @@
 
 ## 快速使用
 
-1. 从 [Releases](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/latest) 获取 `CodexLocalQuotaDashboard-v2.0.0.exe`。
+1. 从 [Releases](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/latest) 获取 `CodexLocalQuotaDashboard-v1.1.0.exe`。
 2. 双击运行，程序会自动扫描 `%USERPROFILE%\.codex\sessions` 和 `archived_sessions`，无需安装和登录。
 3. 仪表盘会显示最近的本地额度快照，以及今日、近 7 天和近 30 天 Token 用量。
 4. 左键点击托盘图标可直接显示缓存快照仪表盘；在仪表盘任意位置点击右键，可切换顶部横条、调整背景透明度或设置开机启动。
