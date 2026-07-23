@@ -6,12 +6,14 @@ using System.Drawing.Text;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.Reflection;
+using System.Globalization;
+using System.Security;
+using System.Web.Script.Serialization;
 using Microsoft.Win32;
 
 [assembly: AssemblyTitle("Codex Local Quota Dashboard")]
@@ -48,7 +50,7 @@ namespace CodexLocalDashboard
                 try { SetProcessDpiAwarenessContext(new IntPtr(-4)); }
                 catch { try { SetProcessDPIAware(); } catch { } }
                 Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(true);
+                Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new DashboardForm(activateSignal));
             }
         }
@@ -64,13 +66,15 @@ namespace CodexLocalDashboard
         private RegisteredWaitHandle activationRegistration;
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ToolTip tips = new ToolTip();
+        private readonly ContextMenuStrip contextMenu = new ContextMenuStrip();
+        private readonly CancellationTokenSource refreshCancellation = new CancellationTokenSource();
         private readonly Panel canvas = new Panel();
         private readonly QuotaStripPanel stripPanel = new QuotaStripPanel();
         private readonly StripBackdropForm stripBackdrop = new StripBackdropForm();
         private readonly Form taskbarOwner = new Form();
         private readonly Dictionary<Control, LayoutSpec> layout = new Dictionary<Control, LayoutSpec>();
         private readonly Label quotaTitle = Ui.Label("最近限额快照", 9, FontStyle.Bold, Color.FromArgb(142, 153, 169));
-        private readonly Label quotaValue = Ui.Label("读取中…", 26, FontStyle.Bold, Color.White);
+        private readonly Label quotaValue = Ui.Label("读取中…", 22, FontStyle.Bold, Color.White);
         private readonly Label quotaSub = Ui.Label("正在扫描本地日志", 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
         private readonly Label todayValue = Ui.Metric("—");
         private readonly Label weekValue = Ui.Metric("—");
@@ -98,12 +102,20 @@ namespace CodexLocalDashboard
         private ToolStripMenuItem lightThemeItem;
         private ToolStripMenuItem transparentThemeItem;
         private ThemeMode themeMode = ThemeMode.Dark;
+        private Icon trayIcon;
+        private Rectangle lastStripBounds = Rectangle.Empty;
+        private Rectangle lastBackdropBounds = Rectangle.Empty;
+        private int codexMissCount;
+        private bool changingStartup;
+        private bool lastCodexForeground;
+        private int backgroundTransparency = 10;
+        private static readonly uint OwnProcessId = unchecked((uint)Process.GetCurrentProcess().Id);
 
         public DashboardForm(EventWaitHandle activateSignal)
         {
             Text = "Codex 本地用量";
             using (var graphics = Graphics.FromHwnd(IntPtr.Zero)) dpiScale = Math.Max(1f, graphics.DpiX / 96f);
-            ClientSize = DpiSize(DesignWidth, DesignHeight);
+            ClientSize = DpiSize(256, 180);
             MinimumSize = DpiSize(256, 180);
             MaximumSize = DpiSize(576, 405);
             FormBorderStyle = FormBorderStyle.None;
@@ -114,7 +126,7 @@ namespace CodexLocalDashboard
             TopMost = true;
             DoubleBuffered = true;
             AutoScaleMode = AutoScaleMode.None;
-            Font = new Font("Microsoft YaHei UI", 9f);
+            Font = new Font(Ui.FontFamilyName, 9f);
             taskbarOwner.ShowInTaskbar = false;
             taskbarOwner.FormBorderStyle = FormBorderStyle.FixedToolWindow;
             taskbarOwner.Opacity = 0;
@@ -122,7 +134,7 @@ namespace CodexLocalDashboard
             taskbarOwner.StartPosition = FormStartPosition.Manual;
             taskbarOwner.Location = new Point(-32000, -32000);
             stripBackdrop.BackColor = Color.FromArgb(244, 244, 242);
-            stripBackdrop.Opacity = 0.70;
+            stripBackdrop.Opacity = 0.90;
             HandleCreated += delegate { EnsureHiddenFromTaskbar(); };
 
             canvas.Size = new Size(DesignWidth, DesignHeight);
@@ -152,14 +164,20 @@ namespace CodexLocalDashboard
             CaptureLayout();
             AttachDrag(canvas);
             ConfigureTray();
-            ApplyTheme(LoadTheme());
+            backgroundTransparency = LoadBackgroundTransparency();
+            ApplyTheme(LoadTheme(), false);
             SetSavedPosition();
             ScaleCanvas();
 
             FormClosing += OnClosing;
             Resize += delegate { if (!stripMode) ScaleCanvas(); };
             ResizeEnd += delegate { if (!stripMode) SavePosition(); };
-            Shown += delegate { RefreshData(); };
+            Shown += delegate
+            {
+                SetPerPixelLayered(true);
+                RenderLayeredSurface();
+                RefreshData();
+            };
             countdownTimer.Interval = 1000;
             countdownTimer.Tick += delegate { if (!refreshing && --secondsRemaining <= 0) RefreshData(); };
             countdownTimer.Start();
@@ -179,15 +197,28 @@ namespace CodexLocalDashboard
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            ApplyCornerPreference();
             try
             {
-                var doNotRound = 1;
-                DwmSetWindowAttribute(Handle, 33, ref doNotRound, sizeof(int));
                 var noBorder = unchecked((int)0xFFFFFFFE);
                 DwmSetWindowAttribute(Handle, 34, ref noBorder, sizeof(int));
             }
             catch { }
+            SetPerPixelLayered(true);
         }
+
+        private void ApplyCornerPreference()
+        {
+            if (!IsHandleCreated) return;
+            try
+            {
+                var cornerPreference = !stripMode && Environment.OSVersion.Version.Build >= 22000 ? 3 : 1;
+                DwmSetWindowAttribute(Handle, 33, ref cornerPreference, sizeof(int));
+            }
+            catch { }
+        }
+
+        protected override bool ShowWithoutActivation { get { return stripMode; } }
 
         private void Add(Control control, int x, int y, int width, int height)
         {
@@ -233,7 +264,11 @@ namespace CodexLocalDashboard
             foreach (var item in layout)
             {
                 var b = item.Value.Bounds;
-                item.Key.Bounds = new Rectangle((int)(b.X * layoutScale), (int)(b.Y * layoutScale), Math.Max(1, (int)(b.Width * layoutScale)), Math.Max(1, (int)(b.Height * layoutScale)));
+                var left = (int)Math.Round(b.Left * layoutScale);
+                var top = (int)Math.Round(b.Top * layoutScale);
+                var right = (int)Math.Round(b.Right * layoutScale);
+                var bottom = (int)Math.Round(b.Bottom * layoutScale);
+                item.Key.Bounds = Rectangle.FromLTRB(left, top, Math.Max(left + 1, right), Math.Max(top + 1, bottom));
                 if (Math.Abs(userScale - lastScale) > .01f)
                 {
                     var old = item.Key.Font;
@@ -242,6 +277,7 @@ namespace CodexLocalDashboard
                 }
             }
             lastScale = userScale;
+            RenderLayeredSurface();
         }
 
         private void AttachDrag(Control parent)
@@ -253,6 +289,27 @@ namespace CodexLocalDashboard
         protected override void WndProc(ref Message m)
         {
             const int WM_NCHITTEST = 0x84;
+            const int WM_DPICHANGED = 0x02E0;
+            if (m.Msg == WM_DPICHANGED)
+            {
+                var newDpi = (int)(m.WParam.ToInt64() & 0xffff);
+                if (newDpi >= 96)
+                {
+                    dpiScale = newDpi / 96f;
+                    stripPanel.DpiScale = dpiScale;
+                    if (!stripMode)
+                    {
+                        var suggested = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
+                        MinimumSize = DpiSize(256, 180);
+                        MaximumSize = DpiSize(576, 405);
+                        Bounds = Rectangle.FromLTRB(suggested.Left, suggested.Top, suggested.Right, suggested.Bottom);
+                        ScaleCanvas();
+                    }
+                    lastStripBounds = Rectangle.Empty;
+                    lastBackdropBounds = Rectangle.Empty;
+                }
+                return;
+            }
             if (!stripMode && m.Msg == WM_NCHITTEST)
             {
                 base.WndProc(ref m);
@@ -283,18 +340,20 @@ namespace CodexLocalDashboard
             refreshing = true;
             try
             {
-                var snapshot = await Task.Run(new Func<UsageSnapshot>(scanner.Scan));
+                var snapshot = await Task.Run(new Func<UsageSnapshot>(scanner.Scan), refreshCancellation.Token);
+                if (refreshCancellation.IsCancellationRequested || IsDisposed) return;
                 ApplySnapshot(snapshot);
                 secondsRemaining = 30;
             }
             catch (Exception ex)
             {
-                quotaSub.Text = ex.Message; secondsRemaining = 30;
+                if (!(ex is OperationCanceledException) && !IsDisposed) quotaSub.Text = "部分日志暂时无法读取";
+                secondsRemaining = 30;
             }
             finally { refreshing = false; }
         }
 
-        private void ApplySnapshot(UsageSnapshot s)
+        internal void ApplySnapshot(UsageSnapshot s)
         {
             latestSnapshot = s;
             stripPanel.Snapshot = s;
@@ -320,48 +379,60 @@ namespace CodexLocalDashboard
             var reset = q.ResetsAt.HasValue ? q.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm") : "未知";
             quotaSub.Text = string.Format("已用 {0:0.#}% · 重置 {1} · {2:HH:mm:ss}", q.UsedPercent, reset, s.QuotaAt.ToLocalTime());
             tips.SetToolTip(quotaTitle, string.Join("\n", s.Quotas.OrderBy(x => x.WindowMinutes).Select(x => Ui.WindowName(x.WindowMinutes) + "：已用 " + x.UsedPercent.ToString("0.#") + "%")));
+            RenderLayeredSurface();
         }
 
         private void ConfigureTray()
         {
             tray.Text = "Codex 本地用量";
-            tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
+            trayIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            tray.Icon = trayIcon ?? SystemIcons.Application;
             tray.Visible = true;
             tray.MouseClick += delegate(object sender, MouseEventArgs e)
             {
                 if (e.Button != MouseButtons.Left) return;
                 if (stripMode) ExitStripMode(); else ShowDashboard();
             };
-            var menu = new ContextMenuStrip();
+            var menu = contextMenu;
             switchModeItem = new ToolStripMenuItem("切换为 Codex 顶部横条");
             switchModeItem.Click += delegate { ToggleDisplayMode(); };
             menu.Items.Add(switchModeItem);
             darkThemeItem = new ToolStripMenuItem("深色");
             lightThemeItem = new ToolStripMenuItem("浅色");
             transparentThemeItem = new ToolStripMenuItem("透明");
-            darkThemeItem.Click += delegate { ApplyTheme(ThemeMode.Dark); };
-            lightThemeItem.Click += delegate { ApplyTheme(ThemeMode.Light); };
-            transparentThemeItem.Click += delegate { ApplyTheme(ThemeMode.Transparent); };
+            darkThemeItem.Click += delegate { ApplyTheme(ThemeMode.Dark, true); };
+            lightThemeItem.Click += delegate { ApplyTheme(ThemeMode.Light, true); };
+            transparentThemeItem.Click += delegate { ApplyTheme(ThemeMode.Transparent, true); };
             menu.Items.Add(darkThemeItem);
             menu.Items.Add(lightThemeItem);
             menu.Items.Add(transparentThemeItem);
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("恢复仪表盘默认大小", null, delegate { if (stripMode) ExitStripMode(); ClientSize = DpiSize(DesignWidth, DesignHeight); ScaleCanvas(); SavePosition(); });
+            menu.Items.Add("调整背景透明度…", null, delegate { ShowTransparencyDialog(); });
             topmostMenuItem = new ToolStripMenuItem("窗口置顶") { Checked = TopMost, CheckOnClick = true };
             topmostMenuItem.CheckedChanged += delegate { if (!stripMode) TopMost = topmostMenuItem.Checked; };
             menu.Items.Add(topmostMenuItem);
             var startup = new ToolStripMenuItem("开机自动启动") { Checked = IsStartupEnabled(), CheckOnClick = true };
-            startup.CheckedChanged += delegate { SetStartup(startup.Checked); };
+            startup.CheckedChanged += delegate
+            {
+                if (changingStartup) return;
+                var wanted = startup.Checked;
+                if (SetStartup(wanted)) return;
+                changingStartup = true;
+                startup.Checked = !wanted;
+                changingStartup = false;
+                tray.ShowBalloonTip(2500, "Codex 本地用量", "无法更改开机启动设置。", ToolTipIcon.Warning);
+            };
             menu.Items.Add(startup); menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("隐藏", null, delegate { Hide(); });
             menu.Items.Add("退出", null, delegate { exiting = true; Close(); });
             tray.ContextMenuStrip = menu;
             ContextMenuStrip = menu;
+            stripBackdrop.ContextMenuStrip = menu;
             ApplyContextMenu(canvas, menu);
             ApplyContextMenu(stripPanel, menu);
         }
 
-        private void ApplyTheme(ThemeMode mode)
+        internal void ApplyTheme(ThemeMode mode, bool savePreference)
         {
             themeMode = mode;
             var light = mode == ThemeMode.Light || mode == ThemeMode.Transparent;
@@ -369,24 +440,25 @@ namespace CodexLocalDashboard
             var transparentKey = Color.FromArgb(1, 1, 1);
             var dashboardBackground = transparent ? transparentKey : (light ? Color.FromArgb(236, 245, 250) : Color.FromArgb(26, 34, 37));
             var stripBackground = light ? Color.FromArgb(244, 244, 242) : Color.FromArgb(20, 20, 20);
-            var activeColorKey = stripMode && !transparent ? stripBackground : transparentKey;
-            var primary = light ? Color.Black : Color.FromArgb(242, 245, 249);
-            var muted = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(142, 153, 169);
+            var activeColorKey = transparent ? transparentKey : stripBackground;
+            var primary = transparent ? Color.FromArgb(68, 75, 86) : (light ? Color.Black : Color.FromArgb(242, 245, 249));
+            var muted = transparent ? Color.FromArgb(101, 111, 124) : (light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(142, 153, 169));
             var divider = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
             BackColor = stripMode ? activeColorKey : dashboardBackground;
             canvas.BackColor = dashboardBackground;
             stripPanel.BackColor = stripMode ? activeColorKey : dashboardBackground;
             stripBackdrop.BackColor = stripBackground;
-            stripBackdrop.Opacity = 0.70;
+            stripBackdrop.Opacity = 0.90;
             stripPanel.Theme = mode;
             Opacity = 1.0;
-            TransparencyKey = stripMode || transparent ? activeColorKey : Color.Empty;
-            if (!stripMode || transparent) stripBackdrop.Hide();
+            TransparencyKey = Color.Empty;
+            SetPerPixelLayered(true);
+            stripBackdrop.Hide();
 
             foreach (Control control in canvas.Controls)
             {
                 var label = control as SmoothLabel;
-                if (label != null) label.ForeColor = label.Font.Size <= 9f && label != quotaValue ? muted : primary;
+                if (label != null) label.ForeColor = label.Role == TextRole.Muted ? muted : primary;
                 var line = control as Panel;
                 if (line != null) line.BackColor = divider;
             }
@@ -398,10 +470,20 @@ namespace CodexLocalDashboard
             if (darkThemeItem != null) darkThemeItem.Checked = mode == ThemeMode.Dark;
             if (lightThemeItem != null) lightThemeItem.Checked = mode == ThemeMode.Light;
             if (transparentThemeItem != null) transparentThemeItem.Checked = mode == ThemeMode.Transparent;
-            SaveTheme(mode);
+            if (savePreference) SaveTheme(mode);
+            RenderLayeredSurface();
         }
 
         private string ThemePath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexLocalDashboard", "theme.txt"); } }
+        private string BackgroundTransparencyPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexLocalDashboard", "background-transparency.txt"); } }
+        private int BackgroundAlpha
+        {
+            get
+            {
+                if (backgroundTransparency >= 100) return 1;
+                return Math.Max(1, Math.Min(255, (int)Math.Round(255d * (100 - backgroundTransparency) / 100d)));
+            }
+        }
         private ThemeMode LoadTheme()
         {
             try { ThemeMode value; if (Enum.TryParse(File.ReadAllText(ThemePath), out value)) return value; } catch { }
@@ -410,6 +492,46 @@ namespace CodexLocalDashboard
         private void SaveTheme(ThemeMode mode)
         {
             try { Directory.CreateDirectory(Path.GetDirectoryName(ThemePath)); File.WriteAllText(ThemePath, mode.ToString()); } catch { }
+        }
+
+        private int LoadBackgroundTransparency()
+        {
+            try
+            {
+                int value;
+                if (int.TryParse(File.ReadAllText(BackgroundTransparencyPath), out value)) return Math.Max(0, Math.Min(100, value));
+            }
+            catch { }
+            return 10;
+        }
+
+        private void SaveBackgroundTransparency()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(BackgroundTransparencyPath));
+                File.WriteAllText(BackgroundTransparencyPath, backgroundTransparency.ToString());
+            }
+            catch { }
+        }
+
+        private void ShowTransparencyDialog()
+        {
+            var original = backgroundTransparency;
+            using (var dialog = new TransparencyDialog(backgroundTransparency, dpiScale, delegate(int value)
+            {
+                backgroundTransparency = value;
+                RenderLayeredSurface();
+            }))
+            {
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    backgroundTransparency = dialog.TransparencyValue;
+                    SaveBackgroundTransparency();
+                }
+                else backgroundTransparency = original;
+            }
+            RenderLayeredSurface();
         }
 
         private static void ApplyContextMenu(Control parent, ContextMenuStrip menu)
@@ -439,6 +561,7 @@ namespace CodexLocalDashboard
             dashboardTopMost = TopMost;
             SavePosition();
             stripMode = true;
+            ApplyCornerPreference();
             TopMost = false;
             topmostMenuItem.Enabled = false;
             MinimumSize = new Size(1, 1);
@@ -447,9 +570,13 @@ namespace CodexLocalDashboard
             stripPanel.Visible = true;
             stripPanel.Snapshot = latestSnapshot;
             stripPanel.Theme = themeMode;
-            ApplyTheme(themeMode);
+            ApplyTheme(themeMode, false);
             switchModeItem.Text = "切换为桌面仪表盘";
             codexWindow = IntPtr.Zero;
+            codexMissCount = 0;
+            lastStripBounds = Rectangle.Empty;
+            lastBackdropBounds = Rectangle.Empty;
+            EnsureHiddenFromTaskbar();
             followTimer.Start();
             FollowCodex();
         }
@@ -458,13 +585,16 @@ namespace CodexLocalDashboard
         {
             followTimer.Stop();
             stripMode = false;
+            ApplyCornerPreference();
             stripBackdrop.Hide();
             if (ownedCodexWindow != IntPtr.Zero) SetWindowLongPtr(Handle, GWL_HWNDPARENT, taskbarOwner.Handle);
             ownedCodexWindow = IntPtr.Zero;
             codexWindow = IntPtr.Zero;
+            lastStripBounds = Rectangle.Empty;
+            lastBackdropBounds = Rectangle.Empty;
             stripPanel.Visible = false;
             canvas.Visible = true;
-            ApplyTheme(themeMode);
+            ApplyTheme(themeMode, false);
             ShowInTaskbar = false;
             MinimumSize = DpiSize(256, 180);
             MaximumSize = DpiSize(576, 405);
@@ -483,23 +613,20 @@ namespace CodexLocalDashboard
             if (codexWindow == IntPtr.Zero || !IsWindow(codexWindow)) codexWindow = FindCodexWindow();
             if (codexWindow == IntPtr.Zero || !IsWindowVisible(codexWindow) || IsIconic(codexWindow))
             {
-                if (Visible) Hide();
-                if (stripBackdrop.Visible) stripBackdrop.Hide();
+                codexMissCount++;
+                followTimer.Interval = codexMissCount < 5 ? 1000 : 3000;
+                HideStripWindows();
                 return;
             }
+            codexMissCount = 0;
 
             uint codexProcessId;
             GetWindowThreadProcessId(codexWindow, out codexProcessId);
             var foreground = GetForegroundWindow();
             uint foregroundProcessId;
             GetWindowThreadProcessId(foreground, out foregroundProcessId);
-            var ownProcessId = (uint)Process.GetCurrentProcess().Id;
-            if (foregroundProcessId != codexProcessId && foregroundProcessId != ownProcessId)
-            {
-                if (Visible) Hide();
-                if (stripBackdrop.Visible) stripBackdrop.Hide();
-                return;
-            }
+            var codexForeground = foregroundProcessId == codexProcessId || foregroundProcessId == OwnProcessId;
+            followTimer.Interval = codexForeground ? 250 : 500;
 
             if (ownedCodexWindow != codexWindow)
             {
@@ -511,6 +638,15 @@ namespace CodexLocalDashboard
 
             RECT rect;
             if (DwmGetWindowAttributeRect(codexWindow, 9, out rect, Marshal.SizeOf(typeof(RECT))) != 0 && !GetWindowRect(codexWindow, out rect)) return;
+            var targetDpiScale = GetWindowDpiScale(codexWindow);
+            if (Math.Abs(targetDpiScale - dpiScale) > .01f)
+            {
+                dpiScale = targetDpiScale;
+                stripPanel.DpiScale = dpiScale;
+                stripPanel.InvalidatePreferredWidth();
+                lastStripBounds = Rectangle.Empty;
+                lastBackdropBounds = Rectangle.Empty;
+            }
             var targetWidth = rect.Right - rect.Left;
             var availableLogicalWidth = Math.Max(280, targetWidth / dpiScale - 220);
             var preferredLogicalWidth = stripPanel.GetPreferredLogicalWidth();
@@ -519,27 +655,171 @@ namespace CodexLocalDashboard
             var height = (int)Math.Round(24 * dpiScale);
             var x = rect.Left + (targetWidth - width) / 2;
             var y = rect.Top + (int)Math.Round(7 * dpiScale);
-            if (themeMode != ThemeMode.Transparent)
+            var targetBounds = new Rectangle(x, y, width, height);
+            if (stripBackdrop.Visible) stripBackdrop.Hide();
+            lastBackdropBounds = Rectangle.Empty;
+            var wasVisible = Visible;
+            if (!wasVisible) Show();
+            if (lastStripBounds != targetBounds || !wasVisible || (codexForeground && !lastCodexForeground))
             {
-                if (!stripBackdrop.Visible) stripBackdrop.Show();
-                SetWindowPos(stripBackdrop.Handle, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                var flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+                if (!codexForeground) flags |= SWP_NOZORDER;
+                SetWindowPos(Handle, codexForeground ? HWND_TOP : IntPtr.Zero, x, y, width, height, flags);
+                lastStripBounds = targetBounds;
             }
-            else if (stripBackdrop.Visible) stripBackdrop.Hide();
-            if (!Visible) Show();
-            SetWindowPos(Handle, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            lastCodexForeground = codexForeground;
+            RenderLayeredSurface();
+        }
+
+        private void SetPerPixelLayered(bool enabled)
+        {
+            if (!IsHandleCreated) return;
+            var style = GetWindowLongPtr(Handle, GWL_EXSTYLE).ToInt64();
+            var updated = enabled ? style | WS_EX_LAYERED : style & ~WS_EX_LAYERED;
+            if (updated == style) return;
+            SetWindowLongPtr(Handle, GWL_EXSTYLE, new IntPtr(updated));
+            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+
+        private void RenderLayeredSurface()
+        {
+            if (!IsHandleCreated || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+            using (var bitmap = CreateLayeredSurfacePreview()) ApplyLayeredBitmap(bitmap);
+        }
+
+        internal Bitmap CreateLayeredSurfacePreview()
+        {
+            var bitmap = new Bitmap(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using (var graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Transparent);
+                graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                var darkBackground = themeMode == ThemeMode.Dark;
+                var layeredBackground = stripMode
+                    ? (darkBackground ? Color.FromArgb(20, 20, 20) : Color.FromArgb(244, 244, 242))
+                    : (darkBackground ? Color.FromArgb(26, 34, 37) : Color.FromArgb(236, 245, 250));
+                using (var backgroundLayer = new SolidBrush(Color.FromArgb(BackgroundAlpha, layeredBackground))) graphics.FillRectangle(backgroundLayer, 0, 0, bitmap.Width, bitmap.Height);
+                if (stripMode)
+                {
+                    stripPanel.DrawLayered(graphics);
+                }
+                else DrawLayeredDashboard(graphics);
+            }
+            return bitmap;
+        }
+
+        private void DrawLayeredDashboard(Graphics graphics)
+        {
+            foreach (Control control in canvas.Controls)
+            {
+                var bounds = new Rectangle(canvas.Left + control.Left, canvas.Top + control.Top, control.Width, control.Height);
+                var label = control as SmoothLabel;
+                if (label != null)
+                {
+                    using (var brush = new SolidBrush(label.ForeColor))
+                    using (var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.None })
+                        graphics.DrawString(label.Text, label.Font, brush, bounds, format);
+                    continue;
+                }
+                var progress = control as QuotaProgressBar;
+                if (progress != null)
+                {
+                    using (var track = new SolidBrush(Color.FromArgb(150, progress.TrackColor))) graphics.FillRectangle(track, bounds);
+                    var fillWidth = (int)Math.Round(bounds.Width * progress.Value / 100d);
+                    if (fillWidth > 0) using (var fill = new SolidBrush(progress.FillColor)) graphics.FillRectangle(fill, bounds.X, bounds.Y, fillWidth, bounds.Height);
+                    continue;
+                }
+                if (control is Panel)
+                    using (var divider = new SolidBrush(Color.FromArgb(110, control.BackColor))) graphics.FillRectangle(divider, bounds);
+            }
+        }
+
+        private void ApplyLayeredBitmap(Bitmap bitmap)
+        {
+            var screenDc = GetDC(IntPtr.Zero);
+            var memoryDc = CreateCompatibleDC(screenDc);
+            var info = new BITMAPINFO();
+            info.Header.Size = Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+            info.Header.Width = bitmap.Width;
+            info.Header.Height = -bitmap.Height;
+            info.Header.Planes = 1;
+            info.Header.BitCount = 32;
+            IntPtr bits;
+            var bitmapHandle = CreateDIBSection(memoryDc, ref info, 0, out bits, IntPtr.Zero, 0);
+            if (bitmapHandle == IntPtr.Zero || bits == IntPtr.Zero)
+            {
+                if (bitmapHandle != IntPtr.Zero) DeleteObject(bitmapHandle);
+                DeleteDC(memoryDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+                return;
+            }
+            var data = bitmap.LockBits(new Rectangle(Point.Empty, bitmap.Size), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            try
+            {
+                var rowBytes = bitmap.Width * 4;
+                for (var y = 0; y < bitmap.Height; y++)
+                    CopyMemory(IntPtr.Add(bits, y * rowBytes), IntPtr.Add(data.Scan0, y * data.Stride), new UIntPtr((uint)rowBytes));
+            }
+            finally { bitmap.UnlockBits(data); }
+            var previous = SelectObject(memoryDc, bitmapHandle);
+            try
+            {
+                var destination = Location;
+                var size = bitmap.Size;
+                var source = Point.Empty;
+                var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
+                var updated = UpdateLayeredWindow(Handle, screenDc, ref destination, ref size, memoryDc, ref source, 0, ref blend, 2);
+#if RENDER_DIAGNOSTICS
+                try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "CodexLocalDashboard-layered-status.txt"), "updated=" + updated + ";error=" + Marshal.GetLastWin32Error() + ";size=" + size.Width + "x" + size.Height); } catch { }
+#endif
+            }
+            finally
+            {
+                SelectObject(memoryDc, previous);
+                DeleteObject(bitmapHandle);
+                DeleteDC(memoryDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+            }
+        }
+
+        private void HideStripWindows()
+        {
+            if (Visible) Hide();
+            if (stripBackdrop.Visible) stripBackdrop.Hide();
+            lastStripBounds = Rectangle.Empty;
+            lastBackdropBounds = Rectangle.Empty;
+            lastCodexForeground = false;
+        }
+
+        private static float GetWindowDpiScale(IntPtr window)
+        {
+            try
+            {
+                var dpi = GetDpiForWindow(window);
+                if (dpi >= 96) return dpi / 96f;
+            }
+            catch (EntryPointNotFoundException) { }
+            catch (DllNotFoundException) { }
+            return 1f;
         }
 
         private static IntPtr FindCodexWindow()
         {
             foreach (var process in Process.GetProcessesByName("ChatGPT"))
             {
-                try
+                using (process)
                 {
-                    if (process.MainWindowHandle == IntPtr.Zero) continue;
-                    var path = process.MainModule.FileName;
-                    if (path.IndexOf("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase) >= 0) return process.MainWindowHandle;
+                    try
+                    {
+                        if (process.MainWindowHandle == IntPtr.Zero) continue;
+                        var path = process.MainModule.FileName;
+                        if (path.IndexOf("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase) >= 0) return process.MainWindowHandle;
+                    }
+                    catch { }
                 }
-                catch { }
             }
             return IntPtr.Zero;
         }
@@ -558,11 +838,18 @@ namespace CodexLocalDashboard
                     var p = File.ReadAllText(SettingsPath).Split(',');
                     if (p.Length >= 4) ClientSize = new Size(Math.Max(MinimumSize.Width, Math.Min(MaximumSize.Width, int.Parse(p[2]))), Math.Max(MinimumSize.Height, Math.Min(MaximumSize.Height, int.Parse(p[3]))));
                     var point = new Point(int.Parse(p[0]), int.Parse(p[1]));
-                    if (Screen.AllScreens.Any(s => s.WorkingArea.Contains(point))) { Location = point; return; }
+                    var candidate = new Rectangle(point, Size);
+                    if (Screen.AllScreens.Any(s => VisibleFraction(candidate, s.WorkingArea) >= .30)) { Location = point; return; }
                 }
             }
             catch { }
             var area = Screen.PrimaryScreen.WorkingArea; Location = new Point(area.Right - Width - 24, area.Top + 42);
+        }
+        private static double VisibleFraction(Rectangle window, Rectangle workArea)
+        {
+            if (window.Width <= 0 || window.Height <= 0) return 0;
+            var visible = Rectangle.Intersect(window, workArea);
+            return (double)visible.Width * visible.Height / ((double)window.Width * window.Height);
         }
         private void SavePosition() { try { Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)); File.WriteAllText(SettingsPath, Left + "," + Top + "," + ClientSize.Width + "," + ClientSize.Height); } catch { } }
         private void EnsureHiddenFromTaskbar()
@@ -571,12 +858,38 @@ namespace CodexLocalDashboard
             if (!IsHandleCreated) return;
             var style = GetWindowLongPtr(Handle, GWL_EXSTYLE).ToInt64();
             style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+            if (stripMode) style |= WS_EX_NOACTIVATE;
+            else style &= ~WS_EX_NOACTIVATE;
             SetWindowLongPtr(Handle, GWL_EXSTYLE, new IntPtr(style));
             if (!stripMode) SetWindowLongPtr(Handle, GWL_HWNDPARENT, taskbarOwner.Handle);
             SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
-        private static bool IsStartupEnabled() { using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) return key != null && key.GetValue("CodexLocalDashboard") != null; }
-        private static void SetStartup(bool enabled) { using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) { if (enabled) key.SetValue("CodexLocalDashboard", "\"" + Application.ExecutablePath + "\""); else key.DeleteValue("CodexLocalDashboard", false); } }
+        private static bool IsStartupEnabled()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
+                {
+                    var configured = key == null ? null : key.GetValue("CodexLocalDashboard") as string;
+                    return string.Equals(configured, "\"" + Application.ExecutablePath + "\"", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch (Exception ex) { if (!(ex is UnauthorizedAccessException) && !(ex is SecurityException) && !(ex is IOException)) throw; return false; }
+        }
+        private static bool SetStartup(bool enabled)
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
+                {
+                    if (key == null) return false;
+                    if (enabled) key.SetValue("CodexLocalDashboard", "\"" + Application.ExecutablePath + "\"");
+                    else key.DeleteValue("CodexLocalDashboard", false);
+                    return true;
+                }
+            }
+            catch (Exception ex) { if (!(ex is UnauthorizedAccessException) && !(ex is SecurityException) && !(ex is IOException)) throw; return false; }
+        }
         private void OnClosing(object sender, FormClosingEventArgs e)
         {
             if (!exiting && e.CloseReason == CloseReason.UserClosing)
@@ -587,12 +900,18 @@ namespace CodexLocalDashboard
                 return;
             }
             if (!stripMode) SavePosition();
+            refreshCancellation.Cancel();
             if (activationRegistration != null) activationRegistration.Unregister(null);
             countdownTimer.Stop();
             followTimer.Stop();
             tray.Visible = false;
             tray.Dispose();
             tips.Dispose();
+            contextMenu.Dispose();
+            if (trayIcon != null) trayIcon.Dispose();
+            refreshCancellation.Dispose();
+            countdownTimer.Dispose();
+            followTimer.Dispose();
             stripBackdrop.Dispose();
             taskbarOwner.Dispose();
         }
@@ -607,9 +926,22 @@ namespace CodexLocalDashboard
         private const int GWL_EXSTYLE = -20;
         private const long WS_EX_TOOLWINDOW = 0x00000080L;
         private const long WS_EX_APPWINDOW = 0x00040000L;
+        private const long WS_EX_NOACTIVATE = 0x08000000L;
+        private const long WS_EX_LAYERED = 0x00080000L;
         private static readonly IntPtr HWND_TOP = IntPtr.Zero;
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BITMAPINFOHEADER
+        {
+            public int Size, Width, Height;
+            public short Planes, BitCount;
+            public int Compression, SizeImage, XPelsPerMeter, YPelsPerMeter, ColorsUsed, ColorsImportant;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BITMAPINFO { public BITMAPINFOHEADER Header; public int Colors; }
         [DllImport("user32.dll")]
         private static extern bool IsWindow(IntPtr hwnd);
         [DllImport("user32.dll")]
@@ -624,6 +956,26 @@ namespace CodexLocalDashboard
         private static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hwnd);
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr destinationDc, ref Point destination, ref Size size, IntPtr sourceDc, ref Point source, int colorKey, ref BLENDFUNCTION blend, int flags);
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr SelectObject(IntPtr dc, IntPtr value);
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr value);
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFO info, uint usage, out IntPtr bits, IntPtr section, uint offset);
+        [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")]
+        private static extern void CopyMemory(IntPtr destination, IntPtr source, UIntPtr length);
         [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
         private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
         [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
@@ -634,7 +986,6 @@ namespace CodexLocalDashboard
 
     internal sealed class StripBackdropForm : Form
     {
-        private const int WS_EX_TRANSPARENT = 0x00000020;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
         private const int WS_EX_NOACTIVATE = 0x08000000;
 
@@ -653,9 +1004,64 @@ namespace CodexLocalDashboard
             get
             {
                 var value = base.CreateParams;
-                value.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                value.ExStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
                 return value;
             }
+        }
+    }
+
+    internal sealed class TransparencyDialog : Form
+    {
+        private readonly TrackBar slider = new TrackBar();
+        private readonly Label valueLabel = new Label();
+        public int TransparencyValue { get { return slider.Value; } }
+
+        public TransparencyDialog(int initialValue, float dpiScale, Action<int> changed)
+        {
+            var scale = Math.Max(1f, dpiScale);
+            Func<int, int> s = value => (int)Math.Round(value * scale);
+
+            Text = "调整背景透明度";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            ShowInTaskbar = false;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            AutoScaleMode = AutoScaleMode.None;
+            ClientSize = new Size(s(360), s(168));
+            Font = new Font(Ui.FontFamilyName, 9f);
+
+            valueLabel.Text = "背景透明度：" + initialValue + "%";
+            valueLabel.TextAlign = ContentAlignment.MiddleLeft;
+            valueLabel.Bounds = new Rectangle(s(20), s(14), s(320), s(24));
+            Controls.Add(valueLabel);
+
+            slider.Minimum = 0;
+            slider.Maximum = 100;
+            slider.TickFrequency = 10;
+            slider.SmallChange = 1;
+            slider.LargeChange = 10;
+            slider.Value = Math.Max(0, Math.Min(100, initialValue));
+            slider.Bounds = new Rectangle(s(14), s(42), s(332), s(45));
+            slider.ValueChanged += delegate
+            {
+                valueLabel.Text = "背景透明度：" + slider.Value + "%";
+                if (changed != null) changed(slider.Value);
+            };
+            Controls.Add(slider);
+
+            var opaqueLabel = new Label { Text = "0  完全不透明", AutoSize = true, Location = new Point(s(20), s(91)) };
+            var transparentLabel = new Label { Text = "100  完全透明", AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            transparentLabel.Location = new Point(s(244), s(91));
+            Controls.Add(opaqueLabel);
+            Controls.Add(transparentLabel);
+
+            var ok = new Button { Text = "确定", DialogResult = DialogResult.OK, Bounds = new Rectangle(s(188), s(126), s(72), s(29)) };
+            var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(s(270), s(126), s(72), s(29)) };
+            Controls.Add(ok);
+            Controls.Add(cancel);
+            AcceptButton = ok;
+            CancelButton = cancel;
         }
     }
 
@@ -667,19 +1073,46 @@ namespace CodexLocalDashboard
 
     internal static class Ui
     {
-        public static Label Label(string text, float size, FontStyle style, Color color) { return new SmoothLabel { Text = text, Font = new Font("Microsoft YaHei UI", size, style), ForeColor = color, BackColor = Color.Transparent, TextAlign = ContentAlignment.MiddleLeft }; }
+        private static readonly string resolvedUiFont = ResolveUiFont();
+        public static string FontFamilyName { get { return resolvedUiFont; } }
+        private static string ResolveUiFont()
+        {
+            try
+            {
+                using (var installed = new InstalledFontCollection())
+                {
+                    var names = new HashSet<string>(installed.Families.Select(f => f.Name), StringComparer.OrdinalIgnoreCase);
+                    if (names.Contains("Segoe UI Variable Text")) return "Segoe UI Variable Text";
+                    if (names.Contains("Segoe UI")) return "Segoe UI";
+                }
+            }
+            catch { }
+            return "Microsoft YaHei UI";
+        }
+        public static Label Label(string text, float size, FontStyle style, Color color) { return new SmoothLabel { Text = text, Font = new Font(FontFamilyName, size, style), ForeColor = color, BackColor = Color.Transparent, TextAlign = ContentAlignment.MiddleLeft, Role = size <= 9f ? TextRole.Muted : TextRole.Primary }; }
         public static Label Metric(string text) { return Label(text, 13, FontStyle.Bold, Color.White); }
         public static Label Detail(string text) { return Label(text, 9.5f, FontStyle.Bold, Color.FromArgb(224, 228, 236)); }
         public static Color QuotaColor(double remaining)
         {
-            var green = Color.FromArgb(81, 201, 142);
-            var yellow = Color.FromArgb(235, 181, 62);
-            var red = Color.FromArgb(224, 75, 75);
             remaining = Math.Max(0, Math.Min(100, remaining));
-            if (remaining >= 70) return green;
-            if (remaining >= 30) return Blend(yellow, green, (remaining - 30) / 40d);
-            if (remaining >= 10) return Blend(red, yellow, (remaining - 10) / 20d);
-            return red;
+            var stops = new[] { 0d, 10d, 30d, 35d, 50d, 65d, 80d, 100d };
+            var colors = new[]
+            {
+                Color.FromArgb(211, 61, 61),
+                Color.FromArgb(224, 75, 68),
+                Color.FromArgb(229, 103, 58),
+                Color.FromArgb(232, 145, 53),
+                Color.FromArgb(224, 174, 57),
+                Color.FromArgb(164, 197, 72),
+                Color.FromArgb(91, 201, 117),
+                Color.FromArgb(73, 205, 143)
+            };
+            for (var i = 0; i < stops.Length - 1; i++)
+            {
+                if (remaining <= stops[i + 1])
+                    return Blend(colors[i], colors[i + 1], (remaining - stops[i]) / (stops[i + 1] - stops[i]));
+            }
+            return colors[colors.Length - 1];
         }
         private static Color Blend(Color from, Color to, double amount)
         {
@@ -690,18 +1123,24 @@ namespace CodexLocalDashboard
                 (int)Math.Round(from.B + (to.B - from.B) * amount));
         }
         public static string Compact(long value) { if (value >= 1000000000) return (value / 1000000000d).ToString("0.##") + "B"; if (value >= 1000000) return (value / 1000000d).ToString("0.##") + "M"; if (value >= 1000) return (value / 1000d).ToString("0.#") + "K"; return value.ToString("N0"); }
-        public static string WindowName(int minutes) { if (minutes <= 360) return Math.Max(1, minutes / 60) + " 小时额度"; if (minutes == 10080) return "7 天额度"; return (minutes / 1440d).ToString("0.#") + " 天额度"; }
+        public static string WindowName(int minutes)
+        {
+            if (minutes < 60) return minutes + " 分钟额度";
+            if (minutes < 1440) return FormatDuration(minutes / 60d) + " 小时额度";
+            return FormatDuration(minutes / 1440d) + " 天额度";
+        }
+        private static string FormatDuration(double value) { return Math.Abs(value - Math.Round(value)) < .001 ? Math.Round(value).ToString("0") : value.ToString("0.#"); }
     }
+
+    internal enum TextRole { Primary, Muted }
 
     internal sealed class SmoothLabel : Label
     {
+        public TextRole Role { get; set; }
         public SmoothLabel() { SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true); }
         protected override void OnPaint(PaintEventArgs e)
         {
-            var form = FindForm();
             e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            if (form != null && form.TransparencyKey != Color.Empty)
-                e.Graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
             using (var brush = new SolidBrush(ForeColor))
             using (var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.None })
                 e.Graphics.DrawString(Text, Font, brush, ClientRectangle, format);
@@ -737,8 +1176,13 @@ namespace CodexLocalDashboard
 
     internal sealed class QuotaStripPanel : Panel
     {
-        public UsageSnapshot Snapshot { get; set; }
-        public float DpiScale { get; set; }
+        private const string StripFontFamily = "Microsoft YaHei UI";
+        private UsageSnapshot snapshot;
+        private float dpiScale = 1f;
+        private int preferredLogicalWidth = 280;
+        private bool preferredWidthDirty = true;
+        public UsageSnapshot Snapshot { get { return snapshot; } set { snapshot = value; InvalidatePreferredWidth(); } }
+        public float DpiScale { get { return dpiScale; } set { if (Math.Abs(dpiScale - value) > .01f) { dpiScale = value; InvalidatePreferredWidth(); } } }
         public ThemeMode Theme { get; set; }
 
         public QuotaStripPanel()
@@ -748,8 +1192,9 @@ namespace CodexLocalDashboard
 
         public int GetPreferredLogicalWidth()
         {
+            if (!preferredWidthDirty) return preferredLogicalWidth;
             var scale = Math.Max(1f, DpiScale);
-            using (var font = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular))
+            using (var font = new Font(StripFontFamily, 10f, FontStyle.Regular))
             {
                 var data = Snapshot;
                 var leftText = "等待本地限额快照";
@@ -763,34 +1208,40 @@ namespace CodexLocalDashboard
                 var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
                 var leftWidth = TextRenderer.MeasureText(leftText, font, Size.Empty, flags).Width;
                 var resetWidth = TextRenderer.MeasureText(resetText, font, Size.Empty, flags).Width;
-                return Math.Max(280, (int)Math.Ceiling((7 * scale + leftWidth + 5 * scale + 110 * scale + 4 * scale + resetWidth + 6 * scale) / scale));
+                preferredLogicalWidth = Math.Max(280, (int)Math.Ceiling((7 * scale + leftWidth + 5 * scale + 110 * scale + 4 * scale + resetWidth + 6 * scale) / scale));
+                preferredWidthDirty = false;
+                return preferredLogicalWidth;
             }
         }
+
+        public void InvalidatePreferredWidth() { preferredWidthDirty = true; Invalidate(); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            e.Graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
-            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-            e.Graphics.Clear(BackColor);
-            var form = FindForm();
-            if (form != null && form.TransparencyKey != Color.Empty)
-                e.Graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+            DrawContent(e.Graphics, false);
+        }
+
+        public void DrawLayered(Graphics graphics) { DrawContent(graphics, true); }
+
+        private void DrawContent(Graphics graphics, bool layered)
+        {
+            graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            if (!layered) graphics.Clear(BackColor);
             var scale = Math.Max(1f, DpiScale);
             var light = Theme == ThemeMode.Light || Theme == ThemeMode.Transparent;
-            var primaryColor = light ? Color.FromArgb(31, 36, 45) : Color.FromArgb(242, 245, 249);
-            var mutedColor = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(151, 161, 177);
             var menuTextColor = light ? Color.FromArgb(117, 117, 117) : Color.FromArgb(174, 174, 174);
             var trackColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(55, 61, 73);
             var data = Snapshot;
             if (data == null || data.Quotas.Count == 0)
             {
-                using (var font = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular))
+                using (var font = new Font(StripFontFamily, 10f, FontStyle.Regular))
                 using (var brush = new SolidBrush(menuTextColor))
                 using (var waitingFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
-                    e.Graphics.DrawString("等待本地限额快照", font, brush, new RectangleF(8 * scale, 0, ClientSize.Width - 16 * scale, ClientSize.Height), waitingFormat);
+                    graphics.DrawString("等待本地限额快照", font, brush, new RectangleF(8 * scale, 0, ClientSize.Width - 16 * scale, ClientSize.Height), waitingFormat);
                 return;
             }
 
@@ -800,10 +1251,9 @@ namespace CodexLocalDashboard
             var progressHeight = Math.Max(3f, 4 * scale);
             var progressY = (ClientSize.Height - progressHeight) / 2f;
 
-            using (var normal = new Font("Microsoft YaHei UI", 10f, FontStyle.Regular))
-            using (var muted = new SolidBrush(mutedColor))
+            using (var normal = new Font(StripFontFamily, 10f, FontStyle.Regular))
             using (var menuText = new SolidBrush(menuTextColor))
-            using (var track = new SolidBrush(trackColor))
+            using (var track = new SolidBrush(layered ? Color.FromArgb(170, trackColor) : trackColor))
             using (var accent = new SolidBrush(Ui.QuotaColor(remaining)))
             using (var centered = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter })
             {
@@ -815,19 +1265,20 @@ namespace CodexLocalDashboard
                 var progressX = leftX + leftWidth + 5 * scale;
                 var resetX = ClientSize.Width - resetTextWidth - 5 * scale;
                 var progressWidth = Math.Max(20 * scale, resetX - progressX - 4 * scale);
-                e.Graphics.DrawString(leftText, normal, menuText, new RectangleF(leftX, 0, leftWidth + 2 * scale, ClientSize.Height), centered);
-                e.Graphics.FillRectangle(track, progressX, progressY, progressWidth, progressHeight);
-                e.Graphics.FillRectangle(accent, progressX, progressY, (float)(progressWidth * remaining / 100d), progressHeight);
-                e.Graphics.DrawString(reset, normal, menuText, new RectangleF(resetX, 0, resetTextWidth + 2 * scale, ClientSize.Height), centered);
+                graphics.DrawString(leftText, normal, menuText, new RectangleF(leftX, 0, leftWidth + 2 * scale, ClientSize.Height), centered);
+                graphics.FillRectangle(track, progressX, progressY, progressWidth, progressHeight);
+                graphics.FillRectangle(accent, progressX, progressY, (float)(progressWidth * remaining / 100d), progressHeight);
+                graphics.DrawString(reset, normal, menuText, new RectangleF(resetX, 0, resetTextWidth + 2 * scale, ClientSize.Height), centered);
             }
         }
 
         private static string ShortWindowName(int minutes)
         {
-            if (minutes <= 360) return Math.Max(1, minutes / 60) + "小时";
-            if (minutes == 10080) return "7天";
-            return (minutes / 1440d).ToString("0.#") + "天";
+            if (minutes < 60) return minutes + "分钟";
+            if (minutes < 1440) return FormatDuration(minutes / 60d) + "小时";
+            return FormatDuration(minutes / 1440d) + "天";
         }
+        private static string FormatDuration(double value) { return Math.Abs(value - Math.Round(value)) < .001 ? Math.Round(value).ToString("0") : value.ToString("0.#"); }
     }
 
     internal sealed class UsageScanner
@@ -835,38 +1286,51 @@ namespace CodexLocalDashboard
         private readonly object gate = new object();
         private readonly Dictionary<string, FileState> states = new Dictionary<string, FileState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<DateTime, TokenTotals> daily = new Dictionary<DateTime, TokenTotals>();
-        private static readonly Regex Timestamp = new Regex("\\\"timestamp\\\":\\\"(?<v>[^\\\"]+)", RegexOptions.Compiled);
-        private static readonly Regex Usage = new Regex("\\\"total_token_usage\\\":\\{(?<v>[^}]*)\\}", RegexOptions.Compiled);
+        private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 };
+        private readonly string codexRoot;
+
+        public UsageScanner() : this(null) { }
+        internal UsageScanner(string rootOverride)
+        {
+            codexRoot = rootOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+        }
 
         public UsageSnapshot Scan()
         {
             lock (gate)
             {
-                var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var folder in new[] { Path.Combine(root, "sessions"), Path.Combine(root, "archived_sessions") })
+                var discoveryComplete = true;
+                foreach (var folder in new[] { Path.Combine(codexRoot, "sessions"), Path.Combine(codexRoot, "archived_sessions") })
                 {
                     if (!Directory.Exists(folder)) continue;
                     try
                     {
                         foreach (var file in Directory.EnumerateFiles(folder, "*.jsonl", SearchOption.AllDirectories))
                         {
-                            var info = new FileInfo(file);
-                            if (info.LastWriteTime < DateTime.Now.AddDays(-35)) continue;
-                            seen.Add(file);
-                            try { ProcessFile(file, info.Length); }
+                            try
+                            {
+                                var info = new FileInfo(file);
+                                if (info.LastWriteTime < DateTime.Now.AddDays(-35)) continue;
+                                seen.Add(file);
+                                ProcessFile(file, info.Length);
+                            }
+                            catch (FileNotFoundException) { }
+                            catch (DirectoryNotFoundException) { }
                             catch (IOException) { }
                             catch (UnauthorizedAccessException) { }
                         }
                     }
-                    catch (IOException) { }
-                    catch (UnauthorizedAccessException) { }
+                    catch (IOException) { discoveryComplete = false; }
+                    catch (UnauthorizedAccessException) { discoveryComplete = false; }
                 }
-                foreach (var stalePath in states.Keys.Where(path => !seen.Contains(path)).ToList())
+                if (discoveryComplete) foreach (var stalePath in states.Keys.Where(path => !seen.Contains(path)).ToList())
                 {
                     RemoveContribution(states[stalePath]);
                     states.Remove(stalePath);
                 }
+                var oldest = DateTime.Now.Date.AddDays(-35);
+                foreach (var date in daily.Keys.Where(date => date < oldest).ToList()) daily.Remove(date);
                 return BuildSnapshot();
             }
         }
@@ -897,43 +1361,93 @@ namespace CodexLocalDashboard
             foreach (var rawLine in content.Split('\n'))
             {
                 var line = rawLine.TrimEnd('\r');
-                if (line.IndexOf("\"type\":\"token_count\"", StringComparison.Ordinal) >= 0) ParseLine(line, state);
+                if (line.Length == 0) continue;
+                if (line[0] == '\uFEFF') line = line.TrimStart('\uFEFF');
+                try { ParseLine(line, state); }
+                catch (ArgumentException) { }
+                catch (InvalidOperationException) { }
             }
             state.Offset += completeLength;
         }
 
         private void ParseLine(string line, FileState state)
         {
-            var tm = Timestamp.Match(line); DateTimeOffset at;
-            if (!tm.Success || !DateTimeOffset.TryParse(tm.Groups["v"].Value, out at)) return;
-            var um = Usage.Match(line);
-            if (um.Success)
+            var root = json.DeserializeObject(line) as IDictionary<string, object>;
+            if (root == null) return;
+            var payload = Object(root, "payload");
+            string eventType;
+            if (payload == null || !String(payload, "type", out eventType) || !string.Equals(eventType, "token_count", StringComparison.Ordinal)) return;
+            string timestamp;
+            DateTimeOffset at;
+            if (!String(root, "timestamp", out timestamp) || !DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out at)) return;
+
+            var info = Object(payload, "info");
+            var usage = info == null ? null : Object(info, "total_token_usage");
+            if (usage != null)
             {
-                var body = um.Groups["v"].Value;
-                var current = new TokenTotals(Number(body, "input_tokens"), Number(body, "output_tokens"), Number(body, "cached_input_tokens"), Number(body, "reasoning_output_tokens"));
-                var delta = current.DeltaFrom(state.LastTotal); var date = at.LocalDateTime.Date;
-                TokenTotals total; if (!daily.TryGetValue(date, out total)) total = new TokenTotals(); daily[date] = total + delta;
-                TokenTotals own; if (!state.ByDay.TryGetValue(date, out own)) own = new TokenTotals(); state.ByDay[date] = own + delta;
-                state.LastTotal = current; state.LastActivity = at; state.HasUsage = true;
+                long input, output, cached, reasoning;
+                if (Long(usage, "input_tokens", out input) && Long(usage, "output_tokens", out output))
+                {
+                    Long(usage, "cached_input_tokens", out cached);
+                    Long(usage, "reasoning_output_tokens", out reasoning);
+                    var current = new TokenTotals(input, output, cached, reasoning);
+                    var delta = current.DeltaFrom(state.LastTotal); var date = at.LocalDateTime.Date;
+                    TokenTotals total; if (!daily.TryGetValue(date, out total)) total = new TokenTotals(); daily[date] = total + delta;
+                    TokenTotals own; if (!state.ByDay.TryGetValue(date, out own)) own = new TokenTotals(); state.ByDay[date] = own + delta;
+                    state.LastTotal = current; state.LastActivity = at; state.HasUsage = true;
+                }
             }
-            if (at > (state.LatestQuota == null ? DateTimeOffset.MinValue : state.LatestQuota.At) && line.IndexOf("\"rate_limits\"", StringComparison.Ordinal) >= 0)
+            var rateLimits = Object(payload, "rate_limits");
+            if (rateLimits != null && at > (state.LatestQuota == null ? DateTimeOffset.MinValue : state.LatestQuota.At))
             {
-                var windows = new List<QuotaWindow>(); AddQuota(line, "primary", windows); AddQuota(line, "secondary", windows);
+                var windows = new List<QuotaWindow>(); AddQuota(rateLimits, "primary", windows); AddQuota(rateLimits, "secondary", windows);
                 if (windows.Count > 0) state.LatestQuota = new QuotaSnapshot(at, windows);
             }
         }
 
-        private static long Number(string body, string name)
+        private static IDictionary<string, object> Object(IDictionary<string, object> source, string name)
         {
-            var m = Regex.Match(body, "\\\"" + name + "\\\"\\s*:\\s*(?<n>\\d+)"); long n; return m.Success && long.TryParse(m.Groups["n"].Value, out n) ? n : 0;
+            object value;
+            return source.TryGetValue(name, out value) ? value as IDictionary<string, object> : null;
         }
-        private static void AddQuota(string line, string name, List<QuotaWindow> list)
+        private static bool String(IDictionary<string, object> source, string name, out string result)
         {
-            var m = Regex.Match(line, "\\\"" + name + "\\\"\\s*:\\s*\\{(?<v>[^}]*)\\}"); if (!m.Success) return; var body = m.Groups["v"].Value;
-            var minutes = (int)Number(body, "window_minutes"); if (minutes <= 0) return;
-            var usedMatch = Regex.Match(body, "\\\"used_percent\\\"\\s*:\\s*(?<n>[0-9.]+)"); double used = 0; if (usedMatch.Success) double.TryParse(usedMatch.Groups["n"].Value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out used);
-            var unix = Number(body, "resets_at"); DateTimeOffset? reset = unix > 0 ? (DateTimeOffset?)new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero).AddSeconds(unix) : null;
-            list.Add(new QuotaWindow(minutes, used, reset));
+            object value;
+            result = null;
+            if (!source.TryGetValue(name, out value) || value == null) return false;
+            result = value as string;
+            return result != null;
+        }
+        private static bool Long(IDictionary<string, object> source, string name, out long result)
+        {
+            object value;
+            result = 0;
+            if (!source.TryGetValue(name, out value) || value == null) return false;
+            try { result = Convert.ToInt64(value, CultureInfo.InvariantCulture); return result >= 0; }
+            catch (Exception ex) { if (!(ex is FormatException) && !(ex is InvalidCastException) && !(ex is OverflowException)) throw; result = 0; return false; }
+        }
+        private static bool Double(IDictionary<string, object> source, string name, out double result)
+        {
+            object value;
+            result = 0;
+            if (!source.TryGetValue(name, out value) || value == null) return false;
+            try { result = Convert.ToDouble(value, CultureInfo.InvariantCulture); return !double.IsNaN(result) && !double.IsInfinity(result); }
+            catch (Exception ex) { if (!(ex is FormatException) && !(ex is InvalidCastException) && !(ex is OverflowException)) throw; result = 0; return false; }
+        }
+        private static void AddQuota(IDictionary<string, object> rateLimits, string name, List<QuotaWindow> list)
+        {
+            var window = Object(rateLimits, name);
+            if (window == null) return;
+            long rawMinutes;
+            double used;
+            if (!Long(window, "window_minutes", out rawMinutes) || rawMinutes <= 0 || rawMinutes > 525600) return;
+            if (!Double(window, "used_percent", out used)) return;
+            used = Math.Max(0d, Math.Min(100d, used));
+            long unix;
+            DateTimeOffset? reset = Long(window, "resets_at", out unix) && unix > 0
+                ? (DateTimeOffset?)DateTimeOffset.FromUnixTimeSeconds(unix)
+                : null;
+            list.Add(new QuotaWindow((int)rawMinutes, used, reset));
         }
         private void RemoveContribution(FileState state)
         {
@@ -964,7 +1478,11 @@ namespace CodexLocalDashboard
     {
         public long Input, Output, Cached, Reasoning; public long Total { get { return Input + Output; } }
         public TokenTotals(long input = 0, long output = 0, long cached = 0, long reasoning = 0) { Input = input; Output = output; Cached = cached; Reasoning = reasoning; }
-        public TokenTotals DeltaFrom(TokenTotals p) { return new TokenTotals(Math.Max(0, Input - p.Input), Math.Max(0, Output - p.Output), Math.Max(0, Cached - p.Cached), Math.Max(0, Reasoning - p.Reasoning)); }
+        public TokenTotals DeltaFrom(TokenTotals p)
+        {
+            var reset = Input < p.Input || Output < p.Output || Cached < p.Cached || Reasoning < p.Reasoning;
+            return reset ? new TokenTotals(Input, Output, Cached, Reasoning) : new TokenTotals(Input - p.Input, Output - p.Output, Cached - p.Cached, Reasoning - p.Reasoning);
+        }
         public static TokenTotals operator +(TokenTotals a, TokenTotals b) { return new TokenTotals(a.Input + b.Input, a.Output + b.Output, a.Cached + b.Cached, a.Reasoning + b.Reasoning); }
         public static TokenTotals operator -(TokenTotals a, TokenTotals b) { return new TokenTotals(a.Input - b.Input, a.Output - b.Output, a.Cached - b.Cached, a.Reasoning - b.Reasoning); }
     }

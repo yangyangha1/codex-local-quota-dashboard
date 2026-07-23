@@ -13,11 +13,13 @@
     <FileVersion>1.0.0.0</FileVersion>
     <Product>Codex Local Quota Dashboard</Product>
     <Description>Offline Windows dashboard for locally cached Codex quota and token usage.</Description>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
   </PropertyGroup>
   <PropertyGroup>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Program.Framework.cs" />
+    <Reference Include="System.Web.Extensions" />
   </ItemGroup>
 </Project>

@@ -34,12 +34,12 @@
 
 - **完全本地读取**：扫描 `%USERPROFILE%\.codex\sessions` 和 `archived_sessions`。
 - **额度快照**：显示本地日志中最近记录的额度剩余百分比和重置时间。
-- **额度颜色提示**：进度条按剩余额度在 70%、30%、10% 三个界线间由绿渐变为黄、再渐变为红。
+- **额度颜色提示**：进度条按剩余额度在绿、黄绿、琥珀、橙、橙红和红色之间连续渐变。
 - **用量统计**：汇总今日、近 7 天、近 30 天的输入、输出和缓存 Token。
 - **桌面仪表盘**：无标题栏的紧凑窗口，支持拖动、四边缩放和整体等比缩放。
 - **Codex 顶部横条**：自动贴附到 Codex 窗口顶部，只在 Codex 位于前台时显示。
-- **半透明横条**：深色和浅色横条仅背景采用 70% 不透明，文字和进度条保持完全不透明。
-- **三种外观**：深色、浅色和透明模式，可在仪表盘与顶部横条之间同步切换。
+- **背景透明度调节**：仪表盘和顶部横条共用 0～100 的背景透明度，默认 10（背景 90% 不透明），文字与进度信息保持完全不透明。
+- **三种外观**：深色、浅色和透明配色可在仪表盘与顶部横条之间同步切换。
 - **托盘常驻**：支持托盘菜单、窗口置顶、隐藏和开机启动。
 - **快捷唤醒**：左键点击托盘图标可直接显示缓存快照仪表盘，仪表盘不占用 Windows 任务栏。
 - **高 DPI 支持**：针对 Windows 缩放和小尺寸托盘图标进行优化。
@@ -74,7 +74,8 @@ msbuild CodexLocalDashboard.csproj /p:Configuration=Release
   /out:CodexLocalDashboard.exe `
   /reference:System.dll /reference:System.Core.dll `
   /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
-  /reference:Microsoft.CSharp.dll Program.Framework.cs
+  /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll `
+  Program.Framework.cs
 ```
 
 ## 已知限制
