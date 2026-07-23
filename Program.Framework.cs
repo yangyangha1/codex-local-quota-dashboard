@@ -61,10 +61,12 @@ namespace CodexLocalDashboard
         private readonly UsageScanner scanner = new UsageScanner();
         private readonly System.Windows.Forms.Timer countdownTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer followTimer = new System.Windows.Forms.Timer();
+        private RegisteredWaitHandle activationRegistration;
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ToolTip tips = new ToolTip();
         private readonly Panel canvas = new Panel();
         private readonly QuotaStripPanel stripPanel = new QuotaStripPanel();
+        private readonly StripBackdropForm stripBackdrop = new StripBackdropForm();
         private readonly Form taskbarOwner = new Form();
         private readonly Dictionary<Control, LayoutSpec> layout = new Dictionary<Control, LayoutSpec>();
         private readonly Label quotaTitle = Ui.Label("最近限额快照", 9, FontStyle.Bold, Color.FromArgb(142, 153, 169));
@@ -76,7 +78,7 @@ namespace CodexLocalDashboard
         private readonly Label inputValue = Ui.Detail("—");
         private readonly Label outputValue = Ui.Detail("—");
         private readonly Label cacheValue = Ui.Detail("—");
-        private readonly ProgressBar quotaBar = new ProgressBar();
+        private readonly QuotaProgressBar quotaBar = new QuotaProgressBar();
         private Point dragOrigin;
         private bool dragging;
         private bool exiting;
@@ -119,6 +121,8 @@ namespace CodexLocalDashboard
             taskbarOwner.Size = new Size(1, 1);
             taskbarOwner.StartPosition = FormStartPosition.Manual;
             taskbarOwner.Location = new Point(-32000, -32000);
+            stripBackdrop.BackColor = Color.FromArgb(244, 244, 242);
+            stripBackdrop.Opacity = 0.70;
             HandleCreated += delegate { EnsureHiddenFromTaskbar(); };
 
             canvas.Size = new Size(DesignWidth, DesignHeight);
@@ -132,7 +136,6 @@ namespace CodexLocalDashboard
 
             Add(quotaTitle, 14, 3, 292, 18);
             Add(quotaValue, 12, 20, 296, 38);
-            quotaBar.Maximum = 100; quotaBar.Style = ProgressBarStyle.Continuous;
             Add(quotaBar, 14, 60, 292, 6);
             Add(quotaSub, 14, 68, 292, 18);
             AddSeparator(14, 93, 292);
@@ -162,7 +165,7 @@ namespace CodexLocalDashboard
             countdownTimer.Start();
             followTimer.Interval = 250;
             followTimer.Tick += delegate { FollowCodex(); };
-            ThreadPool.RegisterWaitForSingleObject(activateSignal, delegate
+            activationRegistration = ThreadPool.RegisterWaitForSingleObject(activateSignal, delegate
             {
                 if (!IsDisposed && IsHandleCreated) BeginInvoke(new Action(ShowCurrentMode));
             }, null, Timeout.Infinite, false);
@@ -310,8 +313,10 @@ namespace CodexLocalDashboard
                 quotaSub.Text = "等待 Codex 写入限额信息"; quotaBar.Value = 0; return;
             }
             quotaTitle.Text = Ui.WindowName(q.WindowMinutes) + " · 缓存快照";
-            quotaValue.Text = string.Format("剩余 {0:0.#}%", Math.Max(0, 100 - q.UsedPercent));
-            quotaBar.Value = Math.Max(0, Math.Min(100, (int)Math.Round(100 - q.UsedPercent)));
+            var remaining = Math.Max(0, 100 - q.UsedPercent);
+            quotaValue.Text = string.Format("剩余 {0:0.#}%", remaining);
+            quotaBar.Value = Math.Max(0, Math.Min(100, (int)Math.Round(remaining)));
+            quotaBar.FillColor = Ui.QuotaColor(remaining);
             var reset = q.ResetsAt.HasValue ? q.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm") : "未知";
             quotaSub.Text = string.Format("已用 {0:0.#}% · 重置 {1} · {2:HH:mm:ss}", q.UsedPercent, reset, s.QuotaAt.ToLocalTime());
             tips.SetToolTip(quotaTitle, string.Join("\n", s.Quotas.OrderBy(x => x.WindowMinutes).Select(x => Ui.WindowName(x.WindowMinutes) + "：已用 " + x.UsedPercent.ToString("0.#") + "%")));
@@ -361,18 +366,22 @@ namespace CodexLocalDashboard
             themeMode = mode;
             var light = mode == ThemeMode.Light || mode == ThemeMode.Transparent;
             var transparent = mode == ThemeMode.Transparent;
-            var transparentKey = Color.FromArgb(250, 250, 250);
+            var transparentKey = Color.FromArgb(1, 1, 1);
             var dashboardBackground = transparent ? transparentKey : (light ? Color.FromArgb(236, 245, 250) : Color.FromArgb(26, 34, 37));
-            var stripBackground = transparent ? transparentKey : (light ? Color.FromArgb(250, 247, 238) : Color.FromArgb(36, 36, 36));
+            var stripBackground = light ? Color.FromArgb(244, 244, 242) : Color.FromArgb(20, 20, 20);
+            var activeColorKey = stripMode && !transparent ? stripBackground : transparentKey;
             var primary = light ? Color.Black : Color.FromArgb(242, 245, 249);
             var muted = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(142, 153, 169);
             var divider = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
-            BackColor = stripMode ? stripBackground : dashboardBackground;
+            BackColor = stripMode ? activeColorKey : dashboardBackground;
             canvas.BackColor = dashboardBackground;
-            stripPanel.BackColor = stripBackground;
+            stripPanel.BackColor = stripMode ? activeColorKey : dashboardBackground;
+            stripBackdrop.BackColor = stripBackground;
+            stripBackdrop.Opacity = 0.70;
             stripPanel.Theme = mode;
-            Opacity = stripMode && !transparent ? 0.70 : 1.0;
-            TransparencyKey = transparent ? transparentKey : Color.Empty;
+            Opacity = 1.0;
+            TransparencyKey = stripMode || transparent ? activeColorKey : Color.Empty;
+            if (!stripMode || transparent) stripBackdrop.Hide();
 
             foreach (Control control in canvas.Controls)
             {
@@ -384,6 +393,7 @@ namespace CodexLocalDashboard
             quotaTitle.ForeColor = muted;
             quotaSub.ForeColor = muted;
             quotaValue.ForeColor = primary;
+            quotaBar.TrackColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(55, 61, 73);
             stripPanel.Invalidate();
             if (darkThemeItem != null) darkThemeItem.Checked = mode == ThemeMode.Dark;
             if (lightThemeItem != null) lightThemeItem.Checked = mode == ThemeMode.Light;
@@ -448,6 +458,7 @@ namespace CodexLocalDashboard
         {
             followTimer.Stop();
             stripMode = false;
+            stripBackdrop.Hide();
             if (ownedCodexWindow != IntPtr.Zero) SetWindowLongPtr(Handle, GWL_HWNDPARENT, taskbarOwner.Handle);
             ownedCodexWindow = IntPtr.Zero;
             codexWindow = IntPtr.Zero;
@@ -473,6 +484,7 @@ namespace CodexLocalDashboard
             if (codexWindow == IntPtr.Zero || !IsWindowVisible(codexWindow) || IsIconic(codexWindow))
             {
                 if (Visible) Hide();
+                if (stripBackdrop.Visible) stripBackdrop.Hide();
                 return;
             }
 
@@ -485,12 +497,14 @@ namespace CodexLocalDashboard
             if (foregroundProcessId != codexProcessId && foregroundProcessId != ownProcessId)
             {
                 if (Visible) Hide();
+                if (stripBackdrop.Visible) stripBackdrop.Hide();
                 return;
             }
 
             if (ownedCodexWindow != codexWindow)
             {
                 SetWindowLongPtr(Handle, GWL_HWNDPARENT, codexWindow);
+                SetWindowLongPtr(stripBackdrop.Handle, GWL_HWNDPARENT, codexWindow);
                 ownedCodexWindow = codexWindow;
                 EnsureHiddenFromTaskbar();
             }
@@ -505,6 +519,12 @@ namespace CodexLocalDashboard
             var height = (int)Math.Round(24 * dpiScale);
             var x = rect.Left + (targetWidth - width) / 2;
             var y = rect.Top + (int)Math.Round(7 * dpiScale);
+            if (themeMode != ThemeMode.Transparent)
+            {
+                if (!stripBackdrop.Visible) stripBackdrop.Show();
+                SetWindowPos(stripBackdrop.Handle, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+            else if (stripBackdrop.Visible) stripBackdrop.Hide();
             if (!Visible) Show();
             SetWindowPos(Handle, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
@@ -557,7 +577,25 @@ namespace CodexLocalDashboard
         }
         private static bool IsStartupEnabled() { using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) return key != null && key.GetValue("CodexLocalDashboard") != null; }
         private static void SetStartup(bool enabled) { using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) { if (enabled) key.SetValue("CodexLocalDashboard", "\"" + Application.ExecutablePath + "\""); else key.DeleteValue("CodexLocalDashboard", false); } }
-        private void OnClosing(object sender, FormClosingEventArgs e) { if (!exiting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); return; } tray.Visible = false; if (!stripMode) SavePosition(); taskbarOwner.Dispose(); }
+        private void OnClosing(object sender, FormClosingEventArgs e)
+        {
+            if (!exiting && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                Hide();
+                stripBackdrop.Hide();
+                return;
+            }
+            if (!stripMode) SavePosition();
+            if (activationRegistration != null) activationRegistration.Unregister(null);
+            countdownTimer.Stop();
+            followTimer.Stop();
+            tray.Visible = false;
+            tray.Dispose();
+            tips.Dispose();
+            stripBackdrop.Dispose();
+            taskbarOwner.Dispose();
+        }
 
         private const uint SWP_NOACTIVATE = 0x0010;
         private const uint SWP_SHOWWINDOW = 0x0040;
@@ -594,6 +632,33 @@ namespace CodexLocalDashboard
         private static extern int DwmGetWindowAttributeRect(IntPtr hwnd, int attribute, out RECT value, int size);
     }
 
+    internal sealed class StripBackdropForm : Form
+    {
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+
+        public StripBackdropForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            AutoScaleMode = AutoScaleMode.None;
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var value = base.CreateParams;
+                value.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                return value;
+            }
+        }
+    }
+
     internal sealed class LayoutSpec
     {
         public Rectangle Bounds; public float FontSize; public FontStyle FontStyle; public string FontName;
@@ -605,6 +670,25 @@ namespace CodexLocalDashboard
         public static Label Label(string text, float size, FontStyle style, Color color) { return new SmoothLabel { Text = text, Font = new Font("Microsoft YaHei UI", size, style), ForeColor = color, BackColor = Color.Transparent, TextAlign = ContentAlignment.MiddleLeft }; }
         public static Label Metric(string text) { return Label(text, 13, FontStyle.Bold, Color.White); }
         public static Label Detail(string text) { return Label(text, 9.5f, FontStyle.Bold, Color.FromArgb(224, 228, 236)); }
+        public static Color QuotaColor(double remaining)
+        {
+            var green = Color.FromArgb(81, 201, 142);
+            var yellow = Color.FromArgb(235, 181, 62);
+            var red = Color.FromArgb(224, 75, 75);
+            remaining = Math.Max(0, Math.Min(100, remaining));
+            if (remaining >= 70) return green;
+            if (remaining >= 30) return Blend(yellow, green, (remaining - 30) / 40d);
+            if (remaining >= 10) return Blend(red, yellow, (remaining - 10) / 20d);
+            return red;
+        }
+        private static Color Blend(Color from, Color to, double amount)
+        {
+            amount = Math.Max(0, Math.Min(1, amount));
+            return Color.FromArgb(
+                (int)Math.Round(from.R + (to.R - from.R) * amount),
+                (int)Math.Round(from.G + (to.G - from.G) * amount),
+                (int)Math.Round(from.B + (to.B - from.B) * amount));
+        }
         public static string Compact(long value) { if (value >= 1000000000) return (value / 1000000000d).ToString("0.##") + "B"; if (value >= 1000000) return (value / 1000000d).ToString("0.##") + "M"; if (value >= 1000) return (value / 1000d).ToString("0.#") + "K"; return value.ToString("N0"); }
         public static string WindowName(int minutes) { if (minutes <= 360) return Math.Max(1, minutes / 60) + " 小时额度"; if (minutes == 10080) return "7 天额度"; return (minutes / 1440d).ToString("0.#") + " 天额度"; }
     }
@@ -615,10 +699,39 @@ namespace CodexLocalDashboard
         protected override void OnPaint(PaintEventArgs e)
         {
             var form = FindForm();
-            e.Graphics.TextRenderingHint = form != null && form.TransparencyKey != Color.Empty ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAliasGridFit;
+            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            if (form != null && form.TransparencyKey != Color.Empty)
+                e.Graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
             using (var brush = new SolidBrush(ForeColor))
             using (var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.None })
                 e.Graphics.DrawString(Text, Font, brush, ClientRectangle, format);
+        }
+    }
+
+    internal sealed class QuotaProgressBar : Control
+    {
+        private int currentValue;
+        private Color fillColor = Color.FromArgb(81, 201, 142);
+        private Color trackColor = Color.FromArgb(55, 61, 73);
+
+        public int Value { get { return currentValue; } set { currentValue = Math.Max(0, Math.Min(100, value)); Invalidate(); } }
+        public Color FillColor { get { return fillColor; } set { fillColor = value; Invalidate(); } }
+        public Color TrackColor { get { return trackColor; } set { trackColor = value; Invalidate(); } }
+
+        public QuotaProgressBar()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            using (var track = new SolidBrush(trackColor))
+            using (var fill = new SolidBrush(fillColor))
+            {
+                e.Graphics.FillRectangle(track, ClientRectangle);
+                e.Graphics.FillRectangle(fill, 0, 0, (int)Math.Round(ClientSize.Width * currentValue / 100d), ClientSize.Height);
+            }
         }
     }
 
@@ -657,11 +770,14 @@ namespace CodexLocalDashboard
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            e.Graphics.TextRenderingHint = Theme == ThemeMode.Transparent ? TextRenderingHint.SingleBitPerPixelGridFit : TextRenderingHint.AntiAliasGridFit;
+            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             e.Graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
             e.Graphics.Clear(BackColor);
+            var form = FindForm();
+            if (form != null && form.TransparencyKey != Color.Empty)
+                e.Graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
             var scale = Math.Max(1f, DpiScale);
             var light = Theme == ThemeMode.Light || Theme == ThemeMode.Transparent;
             var primaryColor = light ? Color.FromArgb(31, 36, 45) : Color.FromArgb(242, 245, 249);
@@ -688,7 +804,7 @@ namespace CodexLocalDashboard
             using (var muted = new SolidBrush(mutedColor))
             using (var menuText = new SolidBrush(menuTextColor))
             using (var track = new SolidBrush(trackColor))
-            using (var accent = new SolidBrush(Color.FromArgb(81, 201, 142)))
+            using (var accent = new SolidBrush(Ui.QuotaColor(remaining)))
             using (var centered = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter })
             {
                 var leftText = string.Format("{0}剩余：{1:0.#}%", ShortWindowName(quota.WindowMinutes), remaining);
@@ -719,7 +835,6 @@ namespace CodexLocalDashboard
         private readonly object gate = new object();
         private readonly Dictionary<string, FileState> states = new Dictionary<string, FileState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<DateTime, TokenTotals> daily = new Dictionary<DateTime, TokenTotals>();
-        private QuotaSnapshot latestQuota;
         private static readonly Regex Timestamp = new Regex("\\\"timestamp\\\":\\\"(?<v>[^\\\"]+)", RegexOptions.Compiled);
         private static readonly Regex Usage = new Regex("\\\"total_token_usage\\\":\\{(?<v>[^}]*)\\}", RegexOptions.Compiled);
 
@@ -728,13 +843,29 @@ namespace CodexLocalDashboard
             lock (gate)
             {
                 var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var folder in new[] { Path.Combine(root, "sessions"), Path.Combine(root, "archived_sessions") })
                 {
                     if (!Directory.Exists(folder)) continue;
-                    foreach (var file in Directory.EnumerateFiles(folder, "*.jsonl", SearchOption.AllDirectories))
+                    try
                     {
-                        var info = new FileInfo(file); if (info.LastWriteTime < DateTime.Now.AddDays(-35)) continue; ProcessFile(file, info.Length);
+                        foreach (var file in Directory.EnumerateFiles(folder, "*.jsonl", SearchOption.AllDirectories))
+                        {
+                            var info = new FileInfo(file);
+                            if (info.LastWriteTime < DateTime.Now.AddDays(-35)) continue;
+                            seen.Add(file);
+                            try { ProcessFile(file, info.Length); }
+                            catch (IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                        }
                     }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+                foreach (var stalePath in states.Keys.Where(path => !seen.Contains(path)).ToList())
+                {
+                    RemoveContribution(states[stalePath]);
+                    states.Remove(stalePath);
                 }
                 return BuildSnapshot();
             }
@@ -746,19 +877,29 @@ namespace CodexLocalDashboard
             if (!states.TryGetValue(path, out state)) { state = new FileState(); states[path] = state; }
             if (length < state.Offset) { RemoveContribution(state); state = new FileState(); states[path] = state; }
             if (length == state.Offset) return;
+            var byteCount = length - state.Offset;
+            if (byteCount > int.MaxValue) throw new IOException("Codex session increment is too large to scan safely.");
+            var buffer = new byte[(int)byteCount];
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
                 fs.Seek(state.Offset, SeekOrigin.Begin);
-                using (var reader = new StreamReader(fs, Encoding.UTF8, true, 65536, true))
+                var read = 0;
+                while (read < buffer.Length)
                 {
-                    string line;
-                    while ((line = reader.ReadLine()) != null)
-                    {
-                        if (line.IndexOf("\"type\":\"token_count\"", StringComparison.Ordinal) >= 0) ParseLine(line, state);
-                    }
+                    var count = fs.Read(buffer, read, buffer.Length - read);
+                    if (count == 0) break;
+                    read += count;
                 }
             }
-            state.Offset = length;
+            var completeLength = Array.LastIndexOf(buffer, (byte)'\n') + 1;
+            if (completeLength <= 0) return;
+            var content = Encoding.UTF8.GetString(buffer, 0, completeLength);
+            foreach (var rawLine in content.Split('\n'))
+            {
+                var line = rawLine.TrimEnd('\r');
+                if (line.IndexOf("\"type\":\"token_count\"", StringComparison.Ordinal) >= 0) ParseLine(line, state);
+            }
+            state.Offset += completeLength;
         }
 
         private void ParseLine(string line, FileState state)
@@ -775,10 +916,10 @@ namespace CodexLocalDashboard
                 TokenTotals own; if (!state.ByDay.TryGetValue(date, out own)) own = new TokenTotals(); state.ByDay[date] = own + delta;
                 state.LastTotal = current; state.LastActivity = at; state.HasUsage = true;
             }
-            if (at > (latestQuota == null ? DateTimeOffset.MinValue : latestQuota.At) && line.IndexOf("\"rate_limits\"", StringComparison.Ordinal) >= 0)
+            if (at > (state.LatestQuota == null ? DateTimeOffset.MinValue : state.LatestQuota.At) && line.IndexOf("\"rate_limits\"", StringComparison.Ordinal) >= 0)
             {
                 var windows = new List<QuotaWindow>(); AddQuota(line, "primary", windows); AddQuota(line, "secondary", windows);
-                if (windows.Count > 0) latestQuota = new QuotaSnapshot(at, windows);
+                if (windows.Count > 0) state.LatestQuota = new QuotaSnapshot(at, windows);
             }
         }
 
@@ -794,19 +935,30 @@ namespace CodexLocalDashboard
             var unix = Number(body, "resets_at"); DateTimeOffset? reset = unix > 0 ? (DateTimeOffset?)new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero).AddSeconds(unix) : null;
             list.Add(new QuotaWindow(minutes, used, reset));
         }
-        private void RemoveContribution(FileState state) { foreach (var item in state.ByDay) { TokenTotals total; if (daily.TryGetValue(item.Key, out total)) daily[item.Key] = total - item.Value; } }
+        private void RemoveContribution(FileState state)
+        {
+            foreach (var item in state.ByDay)
+            {
+                TokenTotals total;
+                if (!daily.TryGetValue(item.Key, out total)) continue;
+                var updated = total - item.Value;
+                if (updated.Total <= 0 && updated.Cached <= 0 && updated.Reasoning <= 0) daily.Remove(item.Key);
+                else daily[item.Key] = updated;
+            }
+        }
         private UsageSnapshot BuildSnapshot()
         {
             var today = DateTime.Now.Date;
             Func<int, TokenTotals> sum = days => daily.Where(x => x.Key >= today.AddDays(-(days - 1)) && x.Key <= today).Aggregate(new TokenTotals(), (a, x) => a + x.Value);
             var weekStart = DateTimeOffset.Now.AddDays(-7);
+            var latestQuota = states.Values.Where(state => state.LatestQuota != null).Select(state => state.LatestQuota).OrderByDescending(item => item.At).FirstOrDefault();
             return new UsageSnapshot(sum(1), sum(7), sum(30), states.Values.Count(s => s.HasUsage && s.LastActivity >= weekStart), latestQuota == null ? DateTimeOffset.MinValue : latestQuota.At, latestQuota == null ? new List<QuotaWindow>() : latestQuota.Windows);
         }
     }
 
     internal sealed class FileState
     {
-        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset LastActivity; public bool HasUsage;
+        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota;
     }
     internal sealed class TokenTotals
     {
