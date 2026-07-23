@@ -404,7 +404,7 @@ namespace CodexLocalDashboard
             quotaBar.Value = Math.Max(0, Math.Min(100, (int)Math.Round(remaining)));
             quotaBar.FillColor = Ui.QuotaColor(remaining);
             var reset = q.ResetsAt.HasValue ? q.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm") : "未知";
-            quotaSub.Text = string.Format("已用 {0:0.#}% · 重置 {1} · {2:HH:mm:ss}", q.UsedPercent, reset, s.QuotaAt.ToLocalTime());
+            quotaSub.Text = string.Format("已用 {0:0.#}% · 重置 {1}", q.UsedPercent, reset);
             tips.SetToolTip(quotaTitle, string.Join("\n", s.Quotas.OrderBy(x => x.WindowMinutes).Select(x => Ui.WindowName(x.WindowMinutes) + "：已用 " + x.UsedPercent.ToString("0.#") + "%")));
             RenderLayeredSurface();
         }
