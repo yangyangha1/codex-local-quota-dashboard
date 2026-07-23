@@ -59,7 +59,7 @@ namespace CodexLocalDashboard
     internal sealed class DashboardForm : Form
     {
         private const int DesignWidth = 320;
-        private const int DesignHeight = 225;
+        private const int DesignHeight = 360;
         private readonly UsageScanner scanner = new UsageScanner();
         private readonly System.Windows.Forms.Timer countdownTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer followTimer = new System.Windows.Forms.Timer();
@@ -116,9 +116,9 @@ namespace CodexLocalDashboard
         {
             Text = "Codex 本地用量";
             using (var graphics = Graphics.FromHwnd(IntPtr.Zero)) dpiScale = Math.Max(1f, graphics.DpiX / 96f);
-            ClientSize = DpiSize(256, 180);
-            MinimumSize = DpiSize(256, 180);
-            MaximumSize = DpiSize(576, 405);
+            ClientSize = DpiSize(256, 280);
+            MinimumSize = DpiSize(256, 280);
+            MaximumSize = DpiSize(576, 580);
             FormBorderStyle = FormBorderStyle.None;
             BackColor = Color.FromArgb(18, 21, 28);
             ForeColor = Color.White;
@@ -302,8 +302,8 @@ namespace CodexLocalDashboard
                     if (!stripMode)
                     {
                         var suggested = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
-                        MinimumSize = DpiSize(256, 180);
-                        MaximumSize = DpiSize(576, 405);
+                        MinimumSize = DpiSize(256, 280);
+                        MaximumSize = DpiSize(576, 580);
                         Bounds = Rectangle.FromLTRB(suggested.Left, suggested.Top, suggested.Right, suggested.Bottom);
                         ScaleCanvas();
                     }
@@ -623,8 +623,8 @@ namespace CodexLocalDashboard
             canvas.Visible = true;
             ApplyTheme(themeMode, false);
             ShowInTaskbar = false;
-            MinimumSize = DpiSize(256, 180);
-            MaximumSize = DpiSize(576, 405);
+            MinimumSize = DpiSize(256, 280);
+            MaximumSize = DpiSize(576, 580);
             if (!dashboardBounds.IsEmpty) Bounds = dashboardBounds;
             TopMost = dashboardTopMost;
             topmostMenuItem.Enabled = true;
@@ -766,6 +766,123 @@ namespace CodexLocalDashboard
                 if (control is Panel)
                     using (var divider = new SolidBrush(Color.FromArgb(110, control.BackColor))) graphics.FillRectangle(divider, bounds);
             }
+            DrawHourlyChart(graphics);
+        }
+
+        private void DrawHourlyChart(Graphics graphics)
+        {
+            var data = latestSnapshot;
+            if (data == null || data.Hourly == null || data.Hourly.Count == 0) return;
+
+            var light = themeMode == ThemeMode.Light;
+            var chartX = 14;
+            var chartY = 210;
+            var chartWidth = 292;
+            var chartHeight = 130;
+            var barCount = 24;
+            var now = DateTime.Now;
+            var currentHour = now.Date.AddHours(now.Hour);
+
+            var hourlyValues = new long[barCount];
+            var maxVal = 0L;
+            for (int i = 0; i < barCount; i++)
+            {
+                var hourKey = currentHour.AddHours(-(barCount - 1 - i));
+                var match = data.Hourly.FirstOrDefault(h => h.Key == hourKey);
+                hourlyValues[i] = match.Key != DateTime.MinValue ? match.Value.Total : 0;
+                if (hourlyValues[i] > maxVal) maxVal = hourlyValues[i];
+            }
+
+            var labelFont = new Font(Ui.FontFamilyName, 7f);
+            var titleFont = new Font(Ui.FontFamilyName, 8f, FontStyle.Bold);
+            var mutedColor = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(126, 137, 153);
+            var textColor = light ? Color.Black : Color.FromArgb(224, 228, 236);
+            var dividerColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
+            var trackColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
+            var chartBottom = chartY + chartHeight;
+
+            using (var titleBrush = new SolidBrush(mutedColor))
+            using (var titleFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Near })
+            {
+                graphics.DrawString("近 24 小时消耗", titleFont, titleBrush, chartX, chartY, titleFormat);
+            }
+
+            var barTop = chartY + 18;
+            var barAreaHeight = chartHeight - 18 - 16;
+            var barAreaWidth = chartWidth - 10;
+            var barWidth = Math.Max(3, (int)(barAreaWidth / (double)barCount * 0.7));
+            var barGap = (barAreaWidth - barWidth * barCount) / (barCount - 1);
+            if (barGap < 1) barGap = 1;
+            var barX = chartX + 5;
+
+            using (var trackBrush = new SolidBrush(trackColor))
+            using (var dividerPen = new Pen(dividerColor, 1))
+            {
+                graphics.FillRectangle(trackBrush, chartX + 5, barTop, barAreaWidth, barAreaHeight);
+            }
+
+            var gridLines = 4;
+            using (var gridPen = new Pen(Color.FromArgb(60, dividerColor), 1))
+            using (var gridLabelBrush = new SolidBrush(mutedColor))
+            using (var gridLabelFormat = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
+            {
+                for (int i = 0; i <= gridLines; i++)
+                {
+                    var gy = barTop + (int)(barAreaHeight * i / (double)gridLines);
+                    if (i > 0 && i < gridLines)
+                    {
+                        graphics.DrawLine(gridPen, chartX + 5, gy, chartX + 5 + barAreaWidth, gy);
+                    }
+                    var gridVal = maxVal > 0 ? maxVal * (gridLines - i) / gridLines : 0;
+                    graphics.DrawString(Ui.Compact(gridVal), labelFont, gridLabelBrush, chartX + 2, gy, gridLabelFormat);
+                }
+            }
+
+            var barXPos = barX;
+            for (int i = 0; i < barCount; i++)
+            {
+                var val = hourlyValues[i];
+                var barH = maxVal > 0 ? (int)(barAreaHeight * val / (double)maxVal) : 0;
+                barH = Math.Min(barH, barAreaHeight);
+                var barRect = new Rectangle((int)barXPos, barTop + barAreaHeight - barH, barWidth, barH);
+
+                if (barH > 0)
+                {
+                    var ratio = (double)val / maxVal;
+                    Color barColor;
+                    if (light)
+                    {
+                        barColor = Color.FromArgb(
+                            (int)(55 + ratio * 20),
+                            (int)(160 + ratio * 40),
+                            (int)(200 + ratio * 55));
+                    }
+                    else
+                    {
+                        barColor = Color.FromArgb(
+                            (int)(60 + ratio * 30),
+                            (int)(140 + ratio * 60),
+                            (int)(180 + ratio * 75));
+                    }
+                    using (var fillBrush = new SolidBrush(barColor))
+                        graphics.FillRectangle(fillBrush, barRect);
+                }
+
+                if (i % 4 == 0)
+                {
+                    var hourTime = currentHour.AddHours(-(barCount - 1 - i));
+                    var labelX = barXPos + barWidth / 2 - 10;
+                    var timeLabel = hourTime.ToString("HH");
+                    using (var timeBrush = new SolidBrush(mutedColor))
+                    using (var timeFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near })
+                        graphics.DrawString(timeLabel, labelFont, timeBrush, labelX, barTop + barAreaHeight + 2, timeFormat);
+                }
+
+                barXPos += barWidth + barGap;
+            }
+
+            labelFont.Dispose();
+            titleFont.Dispose();
         }
 
         private void ApplyLayeredBitmap(Bitmap bitmap)
@@ -1387,6 +1504,7 @@ namespace CodexLocalDashboard
         private readonly object gate = new object();
         private readonly Dictionary<string, FileState> states = new Dictionary<string, FileState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<DateTime, TokenTotals> daily = new Dictionary<DateTime, TokenTotals>();
+        private readonly Dictionary<DateTime, TokenTotals> hourly = new Dictionary<DateTime, TokenTotals>();
         private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 };
         private readonly string codexRoot;
 
@@ -1432,6 +1550,8 @@ namespace CodexLocalDashboard
                 }
                 var oldest = DateTime.Now.Date.AddDays(-35);
                 foreach (var date in daily.Keys.Where(date => date < oldest).ToList()) daily.Remove(date);
+                var oldestHour = DateTime.Now.AddHours(-48);
+                foreach (var hour in hourly.Keys.Where(h => h < oldestHour).ToList()) hourly.Remove(hour);
                 return BuildSnapshot();
             }
         }
@@ -1524,8 +1644,11 @@ namespace CodexLocalDashboard
                     Long(usage, "reasoning_output_tokens", out reasoning);
                     var current = new TokenTotals(input, output, cached, reasoning);
                     var delta = current.DeltaFrom(state.LastTotal); var date = at.LocalDateTime.Date;
+                    var hour = at.LocalDateTime.Date.AddHours(at.LocalDateTime.Hour);
                     TokenTotals total; if (!daily.TryGetValue(date, out total)) total = new TokenTotals(); daily[date] = total + delta;
+                    TokenTotals hourTotal; if (!hourly.TryGetValue(hour, out hourTotal)) hourTotal = new TokenTotals(); hourly[hour] = hourTotal + delta;
                     TokenTotals own; if (!state.ByDay.TryGetValue(date, out own)) own = new TokenTotals(); state.ByDay[date] = own + delta;
+                    TokenTotals ownHour; if (!state.ByHour.TryGetValue(hour, out ownHour)) ownHour = new TokenTotals(); state.ByHour[hour] = ownHour + delta;
                     state.LastTotal = current; state.LastActivity = at; state.HasUsage = true;
                 }
             }
@@ -1591,6 +1714,14 @@ namespace CodexLocalDashboard
                 if (updated.Total <= 0 && updated.Cached <= 0 && updated.Reasoning <= 0) daily.Remove(item.Key);
                 else daily[item.Key] = updated;
             }
+            foreach (var item in state.ByHour)
+            {
+                TokenTotals total;
+                if (!hourly.TryGetValue(item.Key, out total)) continue;
+                var updated = total - item.Value;
+                if (updated.Total <= 0 && updated.Cached <= 0 && updated.Reasoning <= 0) hourly.Remove(item.Key);
+                else hourly[item.Key] = updated;
+            }
         }
         private UsageSnapshot BuildSnapshot()
         {
@@ -1598,13 +1729,15 @@ namespace CodexLocalDashboard
             Func<int, TokenTotals> sum = days => daily.Where(x => x.Key >= today.AddDays(-(days - 1)) && x.Key <= today).Aggregate(new TokenTotals(), (a, x) => a + x.Value);
             var weekStart = DateTimeOffset.Now.AddDays(-7);
             var latestQuota = states.Values.Where(state => state.LatestQuota != null).Select(state => state.LatestQuota).OrderByDescending(item => item.At).FirstOrDefault();
-            return new UsageSnapshot(sum(1), sum(7), sum(30), states.Values.Count(s => s.HasUsage && s.LastActivity >= weekStart), latestQuota == null ? DateTimeOffset.MinValue : latestQuota.At, latestQuota == null ? new List<QuotaWindow>() : latestQuota.Windows);
+            var cutoff = DateTime.Now.Date.AddHours(-23);
+            var hourlyData = hourly.Where(x => x.Key >= cutoff).OrderBy(x => x.Key).Select(x => new KeyValuePair<DateTime, TokenTotals>(x.Key, x.Value)).ToList();
+            return new UsageSnapshot(sum(1), sum(7), sum(30), states.Values.Count(s => s.HasUsage && s.LastActivity >= weekStart), latestQuota == null ? DateTimeOffset.MinValue : latestQuota.At, latestQuota == null ? new List<QuotaWindow>() : latestQuota.Windows, hourlyData);
         }
     }
 
     internal sealed class FileState
     {
-        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota;
+        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public readonly Dictionary<DateTime, TokenTotals> ByHour = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota;
     }
     internal sealed class TokenTotals
     {
@@ -1622,7 +1755,7 @@ namespace CodexLocalDashboard
     internal sealed class QuotaSnapshot { public DateTimeOffset At; public List<QuotaWindow> Windows; public QuotaSnapshot(DateTimeOffset a, List<QuotaWindow> w) { At = a; Windows = w; } }
     internal sealed class UsageSnapshot
     {
-        public TokenTotals Today, Week, Month; public int WeekSessions; public DateTimeOffset QuotaAt; public List<QuotaWindow> Quotas;
-        public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l) { Today = t; Week = w; Month = m; WeekSessions = s; QuotaAt = q; Quotas = l; }
+        public TokenTotals Today, Week, Month; public int WeekSessions; public DateTimeOffset QuotaAt; public List<QuotaWindow> Quotas; public List<KeyValuePair<DateTime, TokenTotals>> Hourly;
+        public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l, List<KeyValuePair<DateTime, TokenTotals>> h) { Today = t; Week = w; Month = m; WeekSessions = s; QuotaAt = q; Quotas = l; Hourly = h; }
     }
 }
