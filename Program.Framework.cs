@@ -21,8 +21,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace CodexLocalDashboard
 {
@@ -164,6 +164,7 @@ namespace CodexLocalDashboard
 
             CaptureLayout();
             AttachDrag(canvas);
+            MigrateStartupPath();
             ConfigureTray();
             backgroundTransparency = LoadBackgroundTransparency();
             ApplyTheme(LoadTheme(), false);
@@ -349,7 +350,12 @@ namespace CodexLocalDashboard
             }
             catch (Exception ex)
             {
-                if (!(ex is OperationCanceledException) && !IsDisposed) quotaSub.Text = "部分日志暂时无法读取";
+                if (!(ex is OperationCanceledException) && !IsDisposed)
+                {
+                    quotaSub.Text = "部分日志暂时无法读取";
+                    tips.SetToolTip(quotaTitle, string.Empty);
+                    RenderLayeredSurface();
+                }
                 secondsRemaining = 30;
             }
             finally { refreshing = false; }
@@ -387,7 +393,10 @@ namespace CodexLocalDashboard
             if (q == null)
             {
                 quotaTitle.Text = "最近限额快照"; quotaValue.Text = "暂无缓存";
-                quotaSub.Text = "等待 Codex 写入限额信息"; quotaBar.Value = 0; return;
+                quotaSub.Text = "等待 Codex 写入限额信息"; quotaBar.Value = 0;
+                tips.SetToolTip(quotaTitle, string.Empty);
+                RenderLayeredSurface();
+                return;
             }
             quotaTitle.Text = Ui.WindowName(q.WindowMinutes) + " · 缓存快照";
             var remaining = Math.Max(0, 100 - q.UsedPercent);
@@ -628,7 +637,8 @@ namespace CodexLocalDashboard
         private void FollowCodex()
         {
             if (!stripMode) return;
-            if (codexWindow == IntPtr.Zero || !IsWindow(codexWindow)) codexWindow = FindCodexWindow();
+            if (codexWindow == IntPtr.Zero || !IsWindow(codexWindow))
+                codexWindow = FindCodexWindow(codexMissCount == 0 || codexMissCount % 5 == 0);
             if (codexWindow == IntPtr.Zero || !IsWindowVisible(codexWindow) || IsIconic(codexWindow))
             {
                 codexMissCount++;
@@ -827,22 +837,69 @@ namespace CodexLocalDashboard
             return 1f;
         }
 
-        private static IntPtr FindCodexWindow()
+        private static IntPtr FindCodexWindow(bool includeBroadScan)
         {
-            foreach (var process in Process.GetProcessesByName("ChatGPT"))
+            var candidates = new List<Process>();
+            var seen = new HashSet<int>();
+            foreach (var name in new[] { "Codex", "ChatGPT" })
+            {
+                foreach (var process in Process.GetProcessesByName(name))
+                {
+                    if (seen.Add(process.Id)) candidates.Add(process);
+                    else process.Dispose();
+                }
+            }
+            if (includeBroadScan)
+            {
+                foreach (var process in Process.GetProcesses())
+                {
+                    if (unchecked((uint)process.Id) != OwnProcessId && seen.Add(process.Id)) candidates.Add(process);
+                    else process.Dispose();
+                }
+            }
+
+            var bestWindow = IntPtr.Zero;
+            var bestScore = 0;
+            foreach (var process in candidates)
             {
                 using (process)
                 {
                     try
                     {
-                        if (process.MainWindowHandle == IntPtr.Zero) continue;
-                        var path = process.MainModule.FileName;
-                        if (path.IndexOf("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase) >= 0) return process.MainWindowHandle;
+                        var window = process.MainWindowHandle;
+                        if (window == IntPtr.Zero || !IsWindowVisible(window)) continue;
+                        var score = ScoreCodexProcess(process);
+                        if (score <= bestScore) continue;
+                        bestScore = score;
+                        bestWindow = window;
                     }
                     catch { }
                 }
             }
-            return IntPtr.Zero;
+            return bestScore >= 80 ? bestWindow : IntPtr.Zero;
+        }
+
+        private static int ScoreCodexProcess(Process process)
+        {
+            var score = 0;
+            var name = process.ProcessName ?? string.Empty;
+            if (name.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0) score += 80;
+
+            string path = null;
+            try { path = process.MainModule.FileName; } catch { }
+            if (!string.IsNullOrEmpty(path) && path.IndexOf("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase) >= 0) score += 100;
+
+            try
+            {
+                var version = process.MainModule.FileVersionInfo;
+                var identity = (version.ProductName ?? string.Empty) + " " + (version.FileDescription ?? string.Empty);
+                if (identity.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0) score += 80;
+            }
+            catch { }
+
+            var title = process.MainWindowTitle ?? string.Empty;
+            if (title.IndexOf("Codex", StringComparison.OrdinalIgnoreCase) >= 0) score += 60;
+            return score;
         }
 
         private void BeginDrag(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { dragging = true; dragOrigin = Cursor.Position; } }
@@ -896,6 +953,25 @@ namespace CodexLocalDashboard
                 }
             }
             catch (Exception ex) { if (!(ex is UnauthorizedAccessException) && !(ex is SecurityException) && !(ex is IOException)) throw; return false; }
+        }
+        private static void MigrateStartupPath()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+                {
+                    if (key == null) return;
+                    var configured = key.GetValue("CodexLocalDashboard") as string;
+                    if (string.IsNullOrWhiteSpace(configured)) return;
+                    var current = "\"" + Application.ExecutablePath + "\"";
+                    if (!string.Equals(configured, current, StringComparison.OrdinalIgnoreCase))
+                        key.SetValue("CodexLocalDashboard", current);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!(ex is UnauthorizedAccessException) && !(ex is SecurityException) && !(ex is IOException)) throw;
+            }
         }
         private static bool SetStartup(bool enabled)
         {
@@ -1395,6 +1471,7 @@ namespace CodexLocalDashboard
                             }
                         }
                         completeOffset = chunkOffset + i + 1;
+                        state.Offset = completeOffset;
                         pending.SetLength(0);
                         discardLine = false;
                         segmentStart = i + 1;
