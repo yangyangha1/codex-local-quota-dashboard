@@ -19,6 +19,7 @@ namespace CodexLocalDashboard
                 CounterReset(root);
                 InvalidQuotaIsIgnored(root);
                 DeleteMoveAndTruncate(root);
+                LargeIrrelevantLineIsSkipped(root);
             }
             finally
             {
@@ -81,6 +82,15 @@ namespace CodexLocalDashboard
             Equal("truncate-rebuild", 5, scanner.Scan().Today.Total);
             File.Delete(archived);
             Equal("delete-removes-contribution", 0, scanner.Scan().Today.Total);
+        }
+
+        private static void LargeIrrelevantLineIsSkipped(string root)
+        {
+            ResetFolders(root);
+            var path = Path.Combine(root, "sessions", "large-irrelevant.jsonl");
+            File.WriteAllText(path, "{\"payload\":\"" + new string('x', 5 * 1024 * 1024) + "\"}\n" + TokenLine(8, 2, 1, 0, 25, true) + "\n", Encoding.UTF8);
+            var snapshot = new UsageScanner(root).Scan();
+            Equal("large-irrelevant-line-does-not-block-following-usage", 10, snapshot.Today.Total);
         }
 
         private static string TokenLine(long input, long output, long cached, long reasoning, double used, bool includeUsed)

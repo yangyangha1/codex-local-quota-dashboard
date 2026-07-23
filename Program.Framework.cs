@@ -21,8 +21,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 
 namespace CodexLocalDashboard
 {
@@ -108,6 +108,7 @@ namespace CodexLocalDashboard
         private int codexMissCount;
         private bool changingStartup;
         private bool lastCodexForeground;
+        private bool initialMemoryTrimDone;
         private int backgroundTransparency = 10;
         private static readonly uint OwnProcessId = unchecked((uint)Process.GetCurrentProcess().Id);
 
@@ -344,6 +345,7 @@ namespace CodexLocalDashboard
                 if (refreshCancellation.IsCancellationRequested || IsDisposed) return;
                 ApplySnapshot(snapshot);
                 secondsRemaining = 30;
+                TrimInitialWorkingSet();
             }
             catch (Exception ex)
             {
@@ -351,6 +353,22 @@ namespace CodexLocalDashboard
                 secondsRemaining = 30;
             }
             finally { refreshing = false; }
+        }
+
+        private void TrimInitialWorkingSet()
+        {
+            if (!initialMemoryTrimDone)
+            {
+                initialMemoryTrimDone = true;
+                GC.Collect(2, GCCollectionMode.Optimized, true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect(2, GCCollectionMode.Optimized, true);
+            }
+            try
+            {
+                using (var process = Process.GetCurrentProcess()) EmptyWorkingSet(process.Handle);
+            }
+            catch { }
         }
 
         internal void ApplySnapshot(UsageSnapshot s)
@@ -638,6 +656,7 @@ namespace CodexLocalDashboard
 
             RECT rect;
             if (DwmGetWindowAttributeRect(codexWindow, 9, out rect, Marshal.SizeOf(typeof(RECT))) != 0 && !GetWindowRect(codexWindow, out rect)) return;
+            var needsRender = false;
             var targetDpiScale = GetWindowDpiScale(codexWindow);
             if (Math.Abs(targetDpiScale - dpiScale) > .01f)
             {
@@ -646,6 +665,7 @@ namespace CodexLocalDashboard
                 stripPanel.InvalidatePreferredWidth();
                 lastStripBounds = Rectangle.Empty;
                 lastBackdropBounds = Rectangle.Empty;
+                needsRender = true;
             }
             var targetWidth = rect.Right - rect.Left;
             var availableLogicalWidth = Math.Max(280, targetWidth / dpiScale - 220);
@@ -656,6 +676,7 @@ namespace CodexLocalDashboard
             var x = rect.Left + (targetWidth - width) / 2;
             var y = rect.Top + (int)Math.Round(7 * dpiScale);
             var targetBounds = new Rectangle(x, y, width, height);
+            if (lastStripBounds.Size != targetBounds.Size) needsRender = true;
             if (stripBackdrop.Visible) stripBackdrop.Hide();
             lastBackdropBounds = Rectangle.Empty;
             var wasVisible = Visible;
@@ -668,7 +689,7 @@ namespace CodexLocalDashboard
                 lastStripBounds = targetBounds;
             }
             lastCodexForeground = codexForeground;
-            RenderLayeredSurface();
+            if (needsRender) RenderLayeredSurface();
         }
 
         private void SetPerPixelLayered(bool enabled)
@@ -976,6 +997,8 @@ namespace CodexLocalDashboard
         private static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFO info, uint usage, out IntPtr bits, IntPtr section, uint offset);
         [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")]
         private static extern void CopyMemory(IntPtr destination, IntPtr source, UIntPtr length);
+        [DllImport("psapi.dll")]
+        private static extern bool EmptyWorkingSet(IntPtr process);
         [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
         private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
         [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
@@ -1283,6 +1306,8 @@ namespace CodexLocalDashboard
 
     internal sealed class UsageScanner
     {
+        private const int ReadBufferSize = 64 * 1024;
+        private const int MaxLineBytes = 4 * 1024 * 1024;
         private readonly object gate = new object();
         private readonly Dictionary<string, FileState> states = new Dictionary<string, FileState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<DateTime, TokenTotals> daily = new Dictionary<DateTime, TokenTotals>();
@@ -1341,33 +1366,63 @@ namespace CodexLocalDashboard
             if (!states.TryGetValue(path, out state)) { state = new FileState(); states[path] = state; }
             if (length < state.Offset) { RemoveContribution(state); state = new FileState(); states[path] = state; }
             if (length == state.Offset) return;
-            var byteCount = length - state.Offset;
-            if (byteCount > int.MaxValue) throw new IOException("Codex session increment is too large to scan safely.");
-            var buffer = new byte[(int)byteCount];
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            var buffer = new byte[ReadBufferSize];
+            var completeOffset = state.Offset;
+            using (var pending = new MemoryStream())
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, ReadBufferSize, FileOptions.SequentialScan))
             {
                 fs.Seek(state.Offset, SeekOrigin.Begin);
-                var read = 0;
-                while (read < buffer.Length)
+                var discardLine = false;
+                int read;
+                while ((read = fs.Read(buffer, 0, buffer.Length)) > 0)
                 {
-                    var count = fs.Read(buffer, read, buffer.Length - read);
-                    if (count == 0) break;
-                    read += count;
+                    var chunkOffset = fs.Position - read;
+                    var segmentStart = 0;
+                    for (var i = 0; i < read; i++)
+                    {
+                        if (buffer[i] != (byte)'\n') continue;
+                        var segmentLength = i - segmentStart;
+                        if (!discardLine)
+                        {
+                            if (pending.Length == 0)
+                            {
+                                if (segmentLength <= MaxLineBytes) ParseUtf8Line(buffer, segmentStart, segmentLength, state);
+                            }
+                            else if (pending.Length + segmentLength <= MaxLineBytes)
+                            {
+                                pending.Write(buffer, segmentStart, segmentLength);
+                                ParseUtf8Line(pending.GetBuffer(), 0, (int)pending.Length, state);
+                            }
+                        }
+                        completeOffset = chunkOffset + i + 1;
+                        pending.SetLength(0);
+                        discardLine = false;
+                        segmentStart = i + 1;
+                    }
+                    var trailingLength = read - segmentStart;
+                    if (trailingLength <= 0 || discardLine) continue;
+                    if (pending.Length + trailingLength > MaxLineBytes)
+                    {
+                        pending.SetLength(0);
+                        discardLine = true;
+                    }
+                    else pending.Write(buffer, segmentStart, trailingLength);
                 }
             }
-            var completeLength = Array.LastIndexOf(buffer, (byte)'\n') + 1;
-            if (completeLength <= 0) return;
-            var content = Encoding.UTF8.GetString(buffer, 0, completeLength);
-            foreach (var rawLine in content.Split('\n'))
-            {
-                var line = rawLine.TrimEnd('\r');
-                if (line.Length == 0) continue;
-                if (line[0] == '\uFEFF') line = line.TrimStart('\uFEFF');
-                try { ParseLine(line, state); }
-                catch (ArgumentException) { }
-                catch (InvalidOperationException) { }
-            }
-            state.Offset += completeLength;
+            state.Offset = completeOffset;
+        }
+
+        private void ParseUtf8Line(byte[] bytes, int offset, int count, FileState state)
+        {
+            if (count > 0 && bytes[offset + count - 1] == (byte)'\r') count--;
+            if (count <= 0) return;
+            var line = Encoding.UTF8.GetString(bytes, offset, count);
+            if (line.Length == 0) return;
+            if (line[0] == '\uFEFF') line = line.TrimStart('\uFEFF');
+            if (line.IndexOf("\"token_count\"", StringComparison.Ordinal) < 0) return;
+            try { ParseLine(line, state); }
+            catch (ArgumentException) { }
+            catch (InvalidOperationException) { }
         }
 
         private void ParseLine(string line, FileState state)
