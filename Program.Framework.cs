@@ -59,8 +59,9 @@ namespace CodexLocalDashboard
     internal sealed class DashboardForm : Form
     {
         private const int DesignWidth = 320;
-        private const int DesignHeight = 225;
+        private const int DesignHeight = 360;
         private readonly UsageScanner scanner = new UsageScanner();
+        private readonly List<CodexClient> clients = new List<CodexClient>();
         private readonly System.Windows.Forms.Timer countdownTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer followTimer = new System.Windows.Forms.Timer();
         private RegisteredWaitHandle activationRegistration;
@@ -82,6 +83,7 @@ namespace CodexLocalDashboard
         private readonly Label inputValue = Ui.Detail("—");
         private readonly Label outputValue = Ui.Detail("—");
         private readonly Label cacheValue = Ui.Detail("—");
+        private readonly Label sourceLabel = Ui.Label("数据来源：Windows", 7, FontStyle.Regular, Color.FromArgb(101, 111, 124));
         private readonly QuotaProgressBar quotaBar = new QuotaProgressBar();
         private Point dragOrigin;
         private bool dragging;
@@ -116,9 +118,9 @@ namespace CodexLocalDashboard
         {
             Text = "Codex 本地用量";
             using (var graphics = Graphics.FromHwnd(IntPtr.Zero)) dpiScale = Math.Max(1f, graphics.DpiX / 96f);
-            ClientSize = DpiSize(256, 180);
-            MinimumSize = DpiSize(256, 180);
-            MaximumSize = DpiSize(576, 405);
+            ClientSize = DpiSize(256, 280);
+            MinimumSize = DpiSize(256, 280);
+            MaximumSize = DpiSize(576, 580);
             FormBorderStyle = FormBorderStyle.None;
             BackColor = Color.FromArgb(18, 21, 28);
             ForeColor = Color.White;
@@ -137,6 +139,8 @@ namespace CodexLocalDashboard
             stripBackdrop.BackColor = Color.FromArgb(244, 244, 242);
             stripBackdrop.Opacity = 0.90;
             HandleCreated += delegate { EnsureHiddenFromTaskbar(); };
+
+            InitializeClients();
 
             canvas.Size = new Size(DesignWidth, DesignHeight);
             canvas.BackColor = BackColor;
@@ -161,6 +165,7 @@ namespace CodexLocalDashboard
             AddDetail("输入", inputValue, 14, 171);
             AddDetail("输出", outputValue, 113, 171);
             AddDetail("缓存复用", cacheValue, 212, 171);
+            Add(sourceLabel, 14, 210, 292, 14);
 
             CaptureLayout();
             AttachDrag(canvas);
@@ -189,6 +194,22 @@ namespace CodexLocalDashboard
             {
                 if (!IsDisposed && IsHandleCreated) BeginInvoke(new Action(ShowCurrentMode));
             }, null, Timeout.Infinite, false);
+        }
+
+        private void InitializeClients()
+        {
+            var roots = UsageScanner.LoadConfiguredRoots();
+            foreach (var root in roots)
+            {
+                var source = "Windows";
+                var lower = root.ToLowerInvariant();
+                if (lower.Contains(@"\\wsl$\")) source = "WSL";
+                else if (lower.Contains(@"\appdata\local\packages\")) source = "VM";
+                clients.Add(new CodexClient(root, source));
+            }
+            if (clients.Count == 0)
+                clients.Add(new CodexClient(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"), "Windows"));
+            sourceLabel.Text = "客户端：" + clients.Count + " 个 (" + string.Join(", ", clients.Select(c => c.DisplayName)) + ")";
         }
 
         private Size DpiSize(int width, int height) { return new Size((int)Math.Round(width * dpiScale), (int)Math.Round(height * dpiScale)); }
@@ -302,8 +323,8 @@ namespace CodexLocalDashboard
                     if (!stripMode)
                     {
                         var suggested = (RECT)Marshal.PtrToStructure(m.LParam, typeof(RECT));
-                        MinimumSize = DpiSize(256, 180);
-                        MaximumSize = DpiSize(576, 405);
+                        MinimumSize = DpiSize(256, 280);
+                        MaximumSize = DpiSize(576, 580);
                         Bounds = Rectangle.FromLTRB(suggested.Left, suggested.Top, suggested.Right, suggested.Bottom);
                         ScaleCanvas();
                     }
@@ -342,9 +363,15 @@ namespace CodexLocalDashboard
             refreshing = true;
             try
             {
-                var snapshot = await Task.Run(new Func<UsageSnapshot>(scanner.Scan), refreshCancellation.Token);
+                var snapshots = new List<UsageSnapshot>();
+                foreach (var client in clients)
+                {
+                    var snap = await Task.Run(new Func<UsageSnapshot>(client.Scanner.Scan), refreshCancellation.Token);
+                    if (snap != null) snapshots.Add(snap);
+                }
                 if (refreshCancellation.IsCancellationRequested || IsDisposed) return;
-                ApplySnapshot(snapshot);
+                var merged = MergeSnapshots(snapshots);
+                ApplySnapshot(merged);
                 secondsRemaining = 30;
                 TrimInitialWorkingSet();
             }
@@ -359,6 +386,42 @@ namespace CodexLocalDashboard
                 secondsRemaining = 30;
             }
             finally { refreshing = false; }
+        }
+
+        private UsageSnapshot MergeSnapshots(List<UsageSnapshot> snapshots)
+        {
+            if (snapshots.Count == 0) return new UsageSnapshot(new TokenTotals(), new TokenTotals(), new TokenTotals(), 0, DateTimeOffset.MinValue, new List<QuotaWindow>(), new List<KeyValuePair<DateTime, TokenTotals>>(), new List<string>());
+            if (snapshots.Count == 1) return snapshots[0];
+
+            var today = new TokenTotals();
+            var week = new TokenTotals();
+            var month = new TokenTotals();
+            var allHourly = new Dictionary<DateTime, TokenTotals>();
+            var latestQuota = new List<QuotaWindow>();
+            var sources = new List<string>();
+            var quotaTime = DateTimeOffset.MinValue;
+
+            foreach (var s in snapshots)
+            {
+                today = today + s.Today;
+                week = week + s.Week;
+                month = month + s.Month;
+                foreach (var h in s.Hourly)
+                {
+                    TokenTotals existing;
+                    if (!allHourly.TryGetValue(h.Key, out existing)) existing = new TokenTotals();
+                    allHourly[h.Key] = existing + h.Value;
+                }
+                if (s.QuotaAt > quotaTime && s.Quotas.Count > 0)
+                {
+                    quotaTime = s.QuotaAt;
+                    latestQuota = s.Quotas;
+                }
+                sources.AddRange(s.Sources);
+            }
+
+            var hourlyList = allHourly.OrderBy(x => x.Key).Select(x => new KeyValuePair<DateTime, TokenTotals>(x.Key, x.Value)).ToList();
+            return new UsageSnapshot(today, week, month, 0, quotaTime, latestQuota, hourlyList, sources.Distinct().ToList());
         }
 
         private void TrimInitialWorkingSet()
@@ -388,6 +451,11 @@ namespace CodexLocalDashboard
             inputValue.Text = Ui.Compact(s.Week.Input);
             outputValue.Text = Ui.Compact(s.Week.Output);
             cacheValue.Text = Ui.Compact(s.Week.Cached);
+
+            if (s.Sources != null && s.Sources.Count > 0)
+                sourceLabel.Text = "数据来源：" + string.Join(" · ", s.Sources);
+            else
+                sourceLabel.Text = "数据来源：—";
 
             var q = s.Quotas.OrderBy(x => x.WindowMinutes).FirstOrDefault();
             if (q == null)
@@ -435,6 +503,7 @@ namespace CodexLocalDashboard
             menu.Items.Add(transparentThemeItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("调整背景透明度…", null, delegate { ShowTransparencyDialog(); });
+            menu.Items.Add("扫描路径设置…", null, delegate { ShowScanPathsDialog(); });
             topmostMenuItem = new ToolStripMenuItem("窗口置顶") { Checked = TopMost, CheckOnClick = true };
             topmostMenuItem.CheckedChanged += delegate { if (!stripMode) TopMost = topmostMenuItem.Checked; };
             menu.Items.Add(topmostMenuItem);
@@ -450,6 +519,7 @@ namespace CodexLocalDashboard
                 tray.ShowBalloonTip(2500, "Codex 本地用量", "无法更改开机启动设置。", ToolTipIcon.Warning);
             };
             menu.Items.Add(startup); menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("刷新数据", null, delegate { RefreshData(); });
             menu.Items.Add("隐藏", null, delegate { Hide(); });
             menu.Items.Add("退出", null, delegate { exiting = true; Close(); });
             tray.ContextMenuStrip = menu;
@@ -561,6 +631,18 @@ namespace CodexLocalDashboard
             RenderLayeredSurface();
         }
 
+        private void ShowScanPathsDialog()
+        {
+            using (var dialog = new ScanPathsDialog(scanner.ScanRoots, dpiScale))
+            {
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    UsageScanner.SaveConfig(dialog.Paths);
+                    tray.ShowBalloonTip(2500, "Codex 本地用量", "扫描路径已更新，将在下次刷新时生效。", ToolTipIcon.Info);
+                }
+            }
+        }
+
         private static void ApplyContextMenu(Control parent, ContextMenuStrip menu)
         {
             parent.ContextMenuStrip = menu;
@@ -623,8 +705,8 @@ namespace CodexLocalDashboard
             canvas.Visible = true;
             ApplyTheme(themeMode, false);
             ShowInTaskbar = false;
-            MinimumSize = DpiSize(256, 180);
-            MaximumSize = DpiSize(576, 405);
+            MinimumSize = DpiSize(256, 280);
+            MaximumSize = DpiSize(576, 580);
             if (!dashboardBounds.IsEmpty) Bounds = dashboardBounds;
             TopMost = dashboardTopMost;
             topmostMenuItem.Enabled = true;
@@ -766,6 +848,123 @@ namespace CodexLocalDashboard
                 if (control is Panel)
                     using (var divider = new SolidBrush(Color.FromArgb(110, control.BackColor))) graphics.FillRectangle(divider, bounds);
             }
+            DrawHourlyChart(graphics);
+        }
+
+        private void DrawHourlyChart(Graphics graphics)
+        {
+            var data = latestSnapshot;
+            if (data == null || data.Hourly == null || data.Hourly.Count == 0) return;
+
+            var light = themeMode == ThemeMode.Light;
+            var chartX = 14;
+            var chartY = 210;
+            var chartWidth = 292;
+            var chartHeight = 130;
+            var barCount = 24;
+            var now = DateTime.Now;
+            var currentHour = now.Date.AddHours(now.Hour);
+
+            var hourlyValues = new long[barCount];
+            var maxVal = 0L;
+            for (int i = 0; i < barCount; i++)
+            {
+                var hourKey = currentHour.AddHours(-(barCount - 1 - i));
+                var match = data.Hourly.FirstOrDefault(h => h.Key == hourKey);
+                hourlyValues[i] = match.Key != DateTime.MinValue ? match.Value.Total : 0;
+                if (hourlyValues[i] > maxVal) maxVal = hourlyValues[i];
+            }
+
+            var labelFont = new Font(Ui.FontFamilyName, 7f);
+            var titleFont = new Font(Ui.FontFamilyName, 8f, FontStyle.Bold);
+            var mutedColor = light ? Color.FromArgb(91, 101, 116) : Color.FromArgb(126, 137, 153);
+            var textColor = light ? Color.Black : Color.FromArgb(224, 228, 236);
+            var dividerColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
+            var trackColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(42, 47, 58);
+            var chartBottom = chartY + chartHeight;
+
+            using (var titleBrush = new SolidBrush(mutedColor))
+            using (var titleFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Near })
+            {
+                graphics.DrawString("近 24 小时消耗", titleFont, titleBrush, chartX, chartY, titleFormat);
+            }
+
+            var barTop = chartY + 18;
+            var barAreaHeight = chartHeight - 18 - 16;
+            var barAreaWidth = chartWidth - 10;
+            var barWidth = Math.Max(3, (int)(barAreaWidth / (double)barCount * 0.7));
+            var barGap = (barAreaWidth - barWidth * barCount) / (barCount - 1);
+            if (barGap < 1) barGap = 1;
+            var barX = chartX + 5;
+
+            using (var trackBrush = new SolidBrush(trackColor))
+            using (var dividerPen = new Pen(dividerColor, 1))
+            {
+                graphics.FillRectangle(trackBrush, chartX + 5, barTop, barAreaWidth, barAreaHeight);
+            }
+
+            var gridLines = 4;
+            using (var gridPen = new Pen(Color.FromArgb(60, dividerColor), 1))
+            using (var gridLabelBrush = new SolidBrush(mutedColor))
+            using (var gridLabelFormat = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
+            {
+                for (int i = 0; i <= gridLines; i++)
+                {
+                    var gy = barTop + (int)(barAreaHeight * i / (double)gridLines);
+                    if (i > 0 && i < gridLines)
+                    {
+                        graphics.DrawLine(gridPen, chartX + 5, gy, chartX + 5 + barAreaWidth, gy);
+                    }
+                    var gridVal = maxVal > 0 ? maxVal * (gridLines - i) / gridLines : 0;
+                    graphics.DrawString(Ui.Compact(gridVal), labelFont, gridLabelBrush, chartX + 2, gy, gridLabelFormat);
+                }
+            }
+
+            var barXPos = barX;
+            for (int i = 0; i < barCount; i++)
+            {
+                var val = hourlyValues[i];
+                var barH = maxVal > 0 ? (int)(barAreaHeight * val / (double)maxVal) : 0;
+                barH = Math.Min(barH, barAreaHeight);
+                var barRect = new Rectangle((int)barXPos, barTop + barAreaHeight - barH, barWidth, barH);
+
+                if (barH > 0)
+                {
+                    var ratio = (double)val / maxVal;
+                    Color barColor;
+                    if (light)
+                    {
+                        barColor = Color.FromArgb(
+                            (int)(55 + ratio * 20),
+                            (int)(160 + ratio * 40),
+                            (int)(200 + ratio * 55));
+                    }
+                    else
+                    {
+                        barColor = Color.FromArgb(
+                            (int)(60 + ratio * 30),
+                            (int)(140 + ratio * 60),
+                            (int)(180 + ratio * 75));
+                    }
+                    using (var fillBrush = new SolidBrush(barColor))
+                        graphics.FillRectangle(fillBrush, barRect);
+                }
+
+                if (i % 4 == 0)
+                {
+                    var hourTime = currentHour.AddHours(-(barCount - 1 - i));
+                    var labelX = barXPos + barWidth / 2 - 10;
+                    var timeLabel = hourTime.ToString("HH");
+                    using (var timeBrush = new SolidBrush(mutedColor))
+                    using (var timeFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near })
+                        graphics.DrawString(timeLabel, labelFont, timeBrush, labelX, barTop + barAreaHeight + 2, timeFormat);
+                }
+
+                barXPos += barWidth + barGap;
+            }
+
+            labelFont.Dispose();
+            titleFont.Dispose();
         }
 
         private void ApplyLayeredBitmap(Bitmap bitmap)
@@ -1164,6 +1363,98 @@ namespace CodexLocalDashboard
         }
     }
 
+    internal sealed class ScanPathsDialog : Form
+    {
+        private readonly ListBox pathList;
+        private readonly List<string> paths;
+        private readonly float dpiScale;
+
+        public List<string> Paths { get { return new List<string>(paths); } }
+
+        public ScanPathsDialog(List<string> initialPaths, float dpi)
+        {
+            dpiScale = Math.Max(1f, dpi);
+            Func<int, int> s = value => (int)Math.Round(value * dpiScale);
+            paths = new List<string>(initialPaths);
+
+            Text = "扫描路径设置";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            ShowInTaskbar = false;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            AutoScaleMode = AutoScaleMode.None;
+            ClientSize = new Size(s(500), s(320));
+            Font = new Font(Ui.FontFamilyName, 9f);
+
+            var infoLabel = new Label
+            {
+                Text = "添加 Codex 日志目录（每行一个路径）：",
+                Bounds = new Rectangle(s(12), s(12), s(476), s(20))
+            };
+            Controls.Add(infoLabel);
+
+            pathList = new ListBox
+            {
+                Bounds = new Rectangle(s(12), s(38), s(476), s(180)),
+                SelectionMode = SelectionMode.One
+            };
+            foreach (var p in paths) pathList.Items.Add(p);
+            Controls.Add(pathList);
+
+            var addBtn = new Button { Text = "添加…", Bounds = new Rectangle(s(12), s(226), s(80), s(28)) };
+            addBtn.Click += delegate
+            {
+                using (var dialog = new FolderBrowserDialog { Description = "选择 Codex 日志目录" })
+                {
+                    if (dialog.ShowDialog(this) == DialogResult.OK)
+                    {
+                        var selected = dialog.SelectedPath;
+                        if (!paths.Contains(selected))
+                        {
+                            paths.Add(selected);
+                            pathList.Items.Add(selected);
+                        }
+                    }
+                }
+            };
+            Controls.Add(addBtn);
+
+            var removeBtn = new Button { Text = "删除", Bounds = new Rectangle(s(100), s(226), s(80), s(28)) };
+            removeBtn.Click += delegate
+            {
+                if (pathList.SelectedIndex >= 0)
+                {
+                    var idx = pathList.SelectedIndex;
+                    paths.RemoveAt(idx);
+                    pathList.Items.RemoveAt(idx);
+                }
+            };
+            Controls.Add(removeBtn);
+
+            var resetBtn = new Button { Text = "重置为默认", Bounds = new Rectangle(s(188), s(226), s(100), s(28)) };
+            resetBtn.Click += delegate
+            {
+                paths.Clear();
+                pathList.Items.Clear();
+                var defaults = UsageScanner.DiscoverDefaultRoots();
+                foreach (var d in defaults)
+                {
+                    paths.Add(d);
+                    pathList.Items.Add(d);
+                }
+            };
+            Controls.Add(resetBtn);
+
+            var ok = new Button { Text = "确定", DialogResult = DialogResult.OK, Bounds = new Rectangle(s(320), s(270), s(80), s(32)) };
+            var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(s(408), s(270), s(80), s(32)) };
+            Controls.Add(ok);
+            Controls.Add(cancel);
+            AcceptButton = ok;
+            CancelButton = cancel;
+        }
+    }
+
     internal sealed class LayoutSpec
     {
         public Rectangle Bounds; public float FontSize; public FontStyle FontStyle; public string FontName;
@@ -1380,6 +1671,54 @@ namespace CodexLocalDashboard
         private static string FormatDuration(double value) { return Math.Abs(value - Math.Round(value)) < .001 ? Math.Round(value).ToString("0") : value.ToString("0.#"); }
     }
 
+    internal sealed class CodexClient
+    {
+        public string RootPath { get; set; }
+        public string SourceName { get; set; }
+        public string AccountEmail { get; set; }
+        public string DisplayName { get; set; }
+        public UsageScanner Scanner { get; set; }
+
+        public CodexClient(string root, string source)
+        {
+            RootPath = root;
+            SourceName = source;
+            Scanner = new UsageScanner(new List<string> { root });
+            AccountEmail = ReadAccountEmail(root);
+            DisplayName = string.IsNullOrEmpty(AccountEmail) ? source : AccountEmail.Split('@')[0];
+        }
+
+        private static string ReadAccountEmail(string root)
+        {
+            try
+            {
+                var authPath = Path.Combine(root, "auth.json");
+                if (!File.Exists(authPath)) return null;
+                var content = File.ReadAllText(authPath);
+                var serializer = new JavaScriptSerializer();
+                var data = serializer.DeserializeObject(content) as IDictionary<string, object>;
+                if (data == null) return null;
+                var tokens = data["tokens"] as IDictionary<string, object>;
+                if (tokens == null) return null;
+                var idToken = tokens["id_token"] as string;
+                if (string.IsNullOrEmpty(idToken)) return null;
+                var parts = idToken.Split('.');
+                if (parts.Length < 2) return null;
+                var payload = parts[1];
+                var padding = payload.Length % 4;
+                if (padding > 0) payload += new string('=', 4 - padding);
+                var bytes = Convert.FromBase64String(payload);
+                var json = Encoding.UTF8.GetString(bytes);
+                var claims = serializer.DeserializeObject(json) as IDictionary<string, object>;
+                if (claims == null) return null;
+                object emailObj;
+                if (claims.TryGetValue("email", out emailObj)) return emailObj as string;
+            }
+            catch { }
+            return null;
+        }
+    }
+
     internal sealed class UsageScanner
     {
         private const int ReadBufferSize = 64 * 1024;
@@ -1387,13 +1726,118 @@ namespace CodexLocalDashboard
         private readonly object gate = new object();
         private readonly Dictionary<string, FileState> states = new Dictionary<string, FileState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<DateTime, TokenTotals> daily = new Dictionary<DateTime, TokenTotals>();
+        private readonly Dictionary<DateTime, TokenTotals> hourly = new Dictionary<DateTime, TokenTotals>();
         private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 };
-        private readonly string codexRoot;
+        private readonly List<string> scanRoots;
+        private readonly List<string> activeSources = new List<string>();
 
         public UsageScanner() : this(null) { }
-        internal UsageScanner(string rootOverride)
+        internal UsageScanner(List<string> rootOverrides)
         {
-            codexRoot = rootOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+            scanRoots = rootOverrides ?? LoadConfiguredRoots();
+        }
+
+        public List<string> ActiveSources { get { return activeSources; } }
+        public List<string> ScanRoots { get { return scanRoots; } }
+
+        private static string ConfigPath
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexLocalDashboard", "scan-paths.json"); }
+        }
+
+        public static List<string> LoadConfiguredRoots()
+        {
+            try
+            {
+                if (File.Exists(ConfigPath))
+                {
+                    var content = File.ReadAllText(ConfigPath);
+                    var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 };
+                    var data = serializer.DeserializeObject(content) as IDictionary<string, object>;
+                    if (data != null)
+                    {
+                        var paths = data["paths"] as System.Collections.ArrayList;
+                        if (paths != null && paths.Count > 0)
+                        {
+                            var result = new List<string>();
+                            foreach (var p in paths)
+                            {
+                                var path = p as string;
+                                if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
+                                    result.Add(path);
+                            }
+                            if (result.Count > 0) return result;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return DiscoverDefaultRoots();
+        }
+
+        public static void SaveConfig(List<string> roots)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(ConfigPath);
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                var paths = new System.Collections.ArrayList();
+                foreach (var r in roots) paths.Add(r);
+                var data = new Dictionary<string, object> { { "paths", paths } };
+                var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 };
+                File.WriteAllText(ConfigPath, serializer.Serialize(data));
+            }
+            catch { }
+        }
+
+        public static List<string> DiscoverDefaultRoots()
+        {
+            var roots = new List<string>();
+            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var localCodex = Path.Combine(userProfile, ".codex");
+            if (Directory.Exists(localCodex)) roots.Add(localCodex);
+
+            try
+            {
+                foreach (var dir in Directory.GetDirectories(@"\\wsl$"))
+                {
+                    var distroName = Path.GetFileName(dir);
+                    var wslHome = Path.Combine(dir, "home");
+                    if (!Directory.Exists(wslHome)) continue;
+                    foreach (var userDir in Directory.GetDirectories(wslHome))
+                    {
+                        var wslCodex = Path.Combine(userDir, ".codex");
+                        if (Directory.Exists(wslCodex)) roots.Add(wslCodex);
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                var hyperVPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                var vmBase = Path.Combine(hyperVPath, "AppData", "Local", "Packages");
+                if (Directory.Exists(vmBase))
+                {
+                    foreach (var pkg in Directory.GetDirectories(vmBase, "*Ubuntu*"))
+                    {
+                        var localState = Path.Combine(pkg, "LocalState");
+                        if (!Directory.Exists(localState)) continue;
+                        foreach (var vhdx in Directory.GetFiles(localState, "*.vhdx"))
+                        {
+                            var appData = Path.Combine(pkg, "LocalState", "rootfs", "root");
+                            if (Directory.Exists(appData))
+                            {
+                                var vmCodex = Path.Combine(appData, ".codex");
+                                if (Directory.Exists(vmCodex)) roots.Add(vmCodex);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return roots;
         }
 
         public UsageSnapshot Scan()
@@ -1402,7 +1846,14 @@ namespace CodexLocalDashboard
             {
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var discoveryComplete = true;
-                foreach (var folder in new[] { Path.Combine(codexRoot, "sessions"), Path.Combine(codexRoot, "archived_sessions") })
+                activeSources.Clear();
+                var folderList = new List<string>();
+                foreach (var root in scanRoots)
+                {
+                    folderList.Add(Path.Combine(root, "sessions"));
+                    folderList.Add(Path.Combine(root, "archived_sessions"));
+                }
+                foreach (var folder in folderList)
                 {
                     if (!Directory.Exists(folder)) continue;
                     try
@@ -1415,6 +1866,8 @@ namespace CodexLocalDashboard
                                 if (info.LastWriteTime < DateTime.Now.AddDays(-35)) continue;
                                 seen.Add(file);
                                 ProcessFile(file, info.Length);
+                                var sourceName = GetSourceName(file);
+                                if (!activeSources.Contains(sourceName)) activeSources.Add(sourceName);
                             }
                             catch (FileNotFoundException) { }
                             catch (DirectoryNotFoundException) { }
@@ -1432,8 +1885,18 @@ namespace CodexLocalDashboard
                 }
                 var oldest = DateTime.Now.Date.AddDays(-35);
                 foreach (var date in daily.Keys.Where(date => date < oldest).ToList()) daily.Remove(date);
+                var oldestHour = DateTime.Now.AddHours(-48);
+                foreach (var hour in hourly.Keys.Where(h => h < oldestHour).ToList()) hourly.Remove(hour);
                 return BuildSnapshot();
             }
+        }
+
+        private string GetSourceName(string filePath)
+        {
+            var lower = filePath.ToLowerInvariant();
+            if (lower.Contains(@"\\wsl$\")) return "WSL";
+            if (lower.Contains(@"\appdata\local\packages\")) return "VM";
+            return "Windows";
         }
 
         private void ProcessFile(string path, long length)
@@ -1524,8 +1987,11 @@ namespace CodexLocalDashboard
                     Long(usage, "reasoning_output_tokens", out reasoning);
                     var current = new TokenTotals(input, output, cached, reasoning);
                     var delta = current.DeltaFrom(state.LastTotal); var date = at.LocalDateTime.Date;
+                    var hour = at.LocalDateTime.Date.AddHours(at.LocalDateTime.Hour);
                     TokenTotals total; if (!daily.TryGetValue(date, out total)) total = new TokenTotals(); daily[date] = total + delta;
+                    TokenTotals hourTotal; if (!hourly.TryGetValue(hour, out hourTotal)) hourTotal = new TokenTotals(); hourly[hour] = hourTotal + delta;
                     TokenTotals own; if (!state.ByDay.TryGetValue(date, out own)) own = new TokenTotals(); state.ByDay[date] = own + delta;
+                    TokenTotals ownHour; if (!state.ByHour.TryGetValue(hour, out ownHour)) ownHour = new TokenTotals(); state.ByHour[hour] = ownHour + delta;
                     state.LastTotal = current; state.LastActivity = at; state.HasUsage = true;
                 }
             }
@@ -1591,6 +2057,14 @@ namespace CodexLocalDashboard
                 if (updated.Total <= 0 && updated.Cached <= 0 && updated.Reasoning <= 0) daily.Remove(item.Key);
                 else daily[item.Key] = updated;
             }
+            foreach (var item in state.ByHour)
+            {
+                TokenTotals total;
+                if (!hourly.TryGetValue(item.Key, out total)) continue;
+                var updated = total - item.Value;
+                if (updated.Total <= 0 && updated.Cached <= 0 && updated.Reasoning <= 0) hourly.Remove(item.Key);
+                else hourly[item.Key] = updated;
+            }
         }
         private UsageSnapshot BuildSnapshot()
         {
@@ -1598,13 +2072,15 @@ namespace CodexLocalDashboard
             Func<int, TokenTotals> sum = days => daily.Where(x => x.Key >= today.AddDays(-(days - 1)) && x.Key <= today).Aggregate(new TokenTotals(), (a, x) => a + x.Value);
             var weekStart = DateTimeOffset.Now.AddDays(-7);
             var latestQuota = states.Values.Where(state => state.LatestQuota != null).Select(state => state.LatestQuota).OrderByDescending(item => item.At).FirstOrDefault();
-            return new UsageSnapshot(sum(1), sum(7), sum(30), states.Values.Count(s => s.HasUsage && s.LastActivity >= weekStart), latestQuota == null ? DateTimeOffset.MinValue : latestQuota.At, latestQuota == null ? new List<QuotaWindow>() : latestQuota.Windows);
+            var cutoff = DateTime.Now.Date.AddHours(-23);
+            var hourlyData = hourly.Where(x => x.Key >= cutoff).OrderBy(x => x.Key).Select(x => new KeyValuePair<DateTime, TokenTotals>(x.Key, x.Value)).ToList();
+            return new UsageSnapshot(sum(1), sum(7), sum(30), states.Values.Count(s => s.HasUsage && s.LastActivity >= weekStart), latestQuota == null ? DateTimeOffset.MinValue : latestQuota.At, latestQuota == null ? new List<QuotaWindow>() : latestQuota.Windows, hourlyData, new List<string>(activeSources));
         }
     }
 
     internal sealed class FileState
     {
-        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota;
+        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public readonly Dictionary<DateTime, TokenTotals> ByHour = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota;
     }
     internal sealed class TokenTotals
     {
@@ -1622,7 +2098,7 @@ namespace CodexLocalDashboard
     internal sealed class QuotaSnapshot { public DateTimeOffset At; public List<QuotaWindow> Windows; public QuotaSnapshot(DateTimeOffset a, List<QuotaWindow> w) { At = a; Windows = w; } }
     internal sealed class UsageSnapshot
     {
-        public TokenTotals Today, Week, Month; public int WeekSessions; public DateTimeOffset QuotaAt; public List<QuotaWindow> Quotas;
-        public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l) { Today = t; Week = w; Month = m; WeekSessions = s; QuotaAt = q; Quotas = l; }
+        public TokenTotals Today, Week, Month; public int WeekSessions; public DateTimeOffset QuotaAt; public List<QuotaWindow> Quotas; public List<KeyValuePair<DateTime, TokenTotals>> Hourly; public List<string> Sources;
+        public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l, List<KeyValuePair<DateTime, TokenTotals>> h, List<string> src) { Today = t; Week = w; Month = m; WeekSessions = s; QuotaAt = q; Quotas = l; Hourly = h; Sources = src; }
     }
 }
