@@ -33,7 +33,10 @@ namespace CodexLocalDashboard
         private static readonly TimeSpan MaximumWindow = TimeSpan.FromSeconds(90);
         private static readonly TimeSpan RawSampleSlack = TimeSpan.FromSeconds(15);
         private static readonly TimeSpan AxisShrinkDelay = TimeSpan.FromMinutes(10);
-        private static readonly TimeSpan MinimumPointSpacing = TimeSpan.FromSeconds(5);
+        // The scanner refreshes independently from repainting. Store at most one
+        // point per fixed minute bucket so repeated refreshes cannot pile several
+        // almost-identical X coordinates into the same chart pixel.
+        private static readonly TimeSpan PointBucketDuration = TimeSpan.FromMinutes(1);
         private static readonly TimeSpan MaximumContinuousGap = TimeSpan.FromMinutes(2);
         private static readonly TimeSpan DisplayDuration = TimeSpan.FromHours(6);
         private static readonly TimeSpan RetentionDuration = TimeSpan.FromHours(6);
@@ -56,6 +59,7 @@ namespace CodexLocalDashboard
         private bool breakBeforeNextTokenPoint;
         private bool hasTokenSource;
         private long lastTokenSource;
+        private DateTime lastTokenSourceDay;
 
         private double? lastQuotaRemaining;
         private bool breakBeforeNextQuotaPoint;
@@ -200,20 +204,30 @@ namespace CodexLocalDashboard
             {
                 hasTokenSource = true;
                 lastTokenSource = cumulativeTokens;
+                lastTokenSourceDay = at.LocalDateTime.Date;
                 AppendTokenPointLocked(at, cumulativeTokens, true);
                 return;
             }
 
-            var sourceWentBackwards = cumulativeTokens < lastTokenSource;
-            lastTokenSource = cumulativeTokens;
-
-            if (sourceWentBackwards)
+            var sourceDay = at.LocalDateTime.Date;
+            if (sourceDay != lastTokenSourceDay)
             {
-                // 跨午夜或本地统计源回退：断开旧线，从新值开始。
+                // 今日累计值只在跨本地日期时允许归零。
+                lastTokenSourceDay = sourceDay;
+                lastTokenSource = cumulativeTokens;
                 AppendTokenPointLocked(at, cumulativeTokens, true);
                 return;
             }
 
+            if (cumulativeTokens < lastTokenSource)
+            {
+                // 扫描恰逢日志移动、写入或枚举交界时，聚合结果可能短暂不完整。
+                // 同一天的累计值不应下降；保持上一有效值，避免异常点落回底部。
+                AppendTokenHoldLocked(at);
+                return;
+            }
+
+            lastTokenSource = cumulativeTokens;
             AppendTokenPointLocked(at, cumulativeTokens, false);
         }
 
@@ -304,6 +318,7 @@ namespace CodexLocalDashboard
             breakBeforeNextTokenPoint = false;
             hasTokenSource = false;
             lastTokenSource = 0;
+            lastTokenSourceDay = DateTime.MinValue;
 
             lastQuotaRemaining = null;
             breakBeforeNextQuotaPoint = false;
@@ -369,14 +384,22 @@ namespace CodexLocalDashboard
                 if (at <= previous.At) return;
                 if (at - previous.At > MaximumContinuousGap) breakBefore = true;
 
-                if (at - previous.At < MinimumPointSpacing)
+                if (!breakBefore && InSamePointBucket(previous.At, at))
                 {
                     points[points.Count - 1] = new HistoryPoint(at, value,
-                        previous.BreakBefore || breakBefore);
+                        previous.BreakBefore);
                     return;
                 }
             }
             points.Add(new HistoryPoint(at, value, breakBefore));
+        }
+
+        private static bool InSamePointBucket(DateTimeOffset left,
+            DateTimeOffset right)
+        {
+            var bucketTicks = PointBucketDuration.Ticks;
+            return left.UtcDateTime.Ticks / bucketTicks ==
+                right.UtcDateTime.Ticks / bucketTicks;
         }
 
         private bool TryFindQuotaBaselineLocked(DateTimeOffset currentAt,
