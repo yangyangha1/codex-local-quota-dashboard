@@ -8,13 +8,13 @@ namespace CodexLocalDashboard
 {
     internal enum UsageChartMode : byte
     {
-        TokenRate = 0,
+        CumulativeToken = 0,
         RemainingQuota = 1
     }
 
     /// <summary>
     /// 任务管理器风格的双模式内存折线图。
-    /// 模式一：最近 60 秒 Token 增量折算为 Token/分钟。
+    /// 模式一：当前本地扫描得到的今日累计 Token。
     /// 模式二：最短额度窗口的剩余额度百分比。
     /// 左键点击图表切换模式；固定显示最近 6 小时；不读写配置或历史文件。
     /// </summary>
@@ -40,8 +40,6 @@ namespace CodexLocalDashboard
         private static readonly TimeSpan RetentionSlack = TimeSpan.FromMinutes(2);
 
         private readonly object gate = new object();
-        private readonly List<TokenCounterSample> tokenSamples =
-            new List<TokenCounterSample>(8);
         private readonly List<QuotaRawSample> quotaSamples =
             new List<QuotaRawSample>(8);
         private readonly List<HistoryPoint> tokenPoints =
@@ -49,16 +47,15 @@ namespace CodexLocalDashboard
         private readonly List<HistoryPoint> quotaPoints =
             new List<HistoryPoint>(736);
 
-        private byte displayModeValue = (byte)UsageChartMode.TokenRate;
+        private byte displayModeValue = (byte)UsageChartMode.CumulativeToken;
         private double tokenAxisMaximum = MinimumTokenAxisMaximum;
         private DateTimeOffset? lowTokenUsageSince;
         private DateTimeOffset? lastCaptureAt;
 
-        private double? lastTokenRate;
+        private double? lastCumulativeToken;
         private bool breakBeforeNextTokenPoint;
-        private bool hasSourceCounter;
-        private long lastSourceCounter;
-        private long normalizedCounter;
+        private bool hasTokenSource;
+        private long lastTokenSource;
 
         private double? lastQuotaRemaining;
         private bool breakBeforeNextQuotaPoint;
@@ -84,9 +81,9 @@ namespace CodexLocalDashboard
         {
             lock (gate)
             {
-                displayModeValue = displayModeValue == (byte)UsageChartMode.TokenRate
+                displayModeValue = displayModeValue == (byte)UsageChartMode.CumulativeToken
                     ? (byte)UsageChartMode.RemainingQuota
-                    : (byte)UsageChartMode.TokenRate;
+                    : (byte)UsageChartMode.CumulativeToken;
             }
         }
 
@@ -111,9 +108,9 @@ namespace CodexLocalDashboard
                 if (lastCaptureAt.HasValue &&
                     capturedAt - lastCaptureAt.Value > MaximumContinuousGap)
                 {
-                    tokenSamples.Clear();
                     quotaSamples.Clear();
-                    lastTokenRate = null;
+                    lastCumulativeToken = null;
+                    hasTokenSource = false;
                     lastQuotaRemaining = null;
                     hasQuotaSource = false;
                     breakBeforeNextTokenPoint = true;
@@ -145,9 +142,9 @@ namespace CodexLocalDashboard
                 if (lastCaptureAt.HasValue &&
                     capturedAt - lastCaptureAt.Value > MaximumContinuousGap)
                 {
-                    tokenSamples.Clear();
                     quotaSamples.Clear();
-                    lastTokenRate = null;
+                    lastCumulativeToken = null;
+                    hasTokenSource = false;
                     lastQuotaRemaining = null;
                     hasQuotaSource = false;
                     breakBeforeNextTokenPoint = true;
@@ -199,63 +196,25 @@ namespace CodexLocalDashboard
                 return;
             }
 
-            if (!hasSourceCounter)
+            if (!hasTokenSource)
             {
-                hasSourceCounter = true;
-                lastSourceCounter = cumulativeTokens;
-                normalizedCounter = 0;
-                tokenSamples.Add(new TokenCounterSample(at, normalizedCounter));
+                hasTokenSource = true;
+                lastTokenSource = cumulativeTokens;
+                AppendTokenPointLocked(at, cumulativeTokens, true);
                 return;
             }
 
-            var sourceDelta = cumulativeTokens - lastSourceCounter;
-            lastSourceCounter = cumulativeTokens;
+            var sourceWentBackwards = cumulativeTokens < lastTokenSource;
+            lastTokenSource = cumulativeTokens;
 
-            if (sourceDelta < 0)
+            if (sourceWentBackwards)
             {
-                tokenSamples.Add(new TokenCounterSample(at, normalizedCounter));
-                PruneTokenSamplesLocked(at);
-                AppendTokenHoldLocked(at);
+                // 跨午夜或本地统计源回退：断开旧线，从新值开始。
+                AppendTokenPointLocked(at, cumulativeTokens, true);
                 return;
             }
 
-            if (sourceDelta > long.MaxValue - normalizedCounter)
-            {
-                AppendTokenHoldLocked(at);
-                tokenSamples.Clear();
-                normalizedCounter = 0;
-                hasSourceCounter = false;
-                breakBeforeNextTokenPoint = true;
-                return;
-            }
-
-            normalizedCounter += sourceDelta;
-            tokenSamples.Add(new TokenCounterSample(at, normalizedCounter));
-            PruneTokenSamplesLocked(at);
-
-            TokenCounterSample baseline;
-            if (!TryFindTokenBaselineLocked(at, out baseline))
-            {
-                AppendTokenHoldLocked(at);
-                return;
-            }
-
-            var elapsedSeconds = (at - baseline.At).TotalSeconds;
-            var delta = normalizedCounter - baseline.CumulativeTokens;
-            if (elapsedSeconds <= 0d || delta < 0)
-            {
-                AppendTokenHoldLocked(at);
-                return;
-            }
-
-            var rate = delta * 60d / elapsedSeconds;
-            if (double.IsNaN(rate) || double.IsInfinity(rate) || rate < 0d)
-            {
-                AppendTokenHoldLocked(at);
-                return;
-            }
-
-            AppendTokenPointLocked(at, rate, false);
+            AppendTokenPointLocked(at, cumulativeTokens, false);
         }
 
         private void CaptureQuotaLocked(DateTimeOffset at, double? remainingPercent,
@@ -334,7 +293,6 @@ namespace CodexLocalDashboard
 
         private void ResetAllLocked(DateTimeOffset? captureAt)
         {
-            tokenSamples.Clear();
             quotaSamples.Clear();
             tokenPoints.Clear();
             quotaPoints.Clear();
@@ -342,11 +300,10 @@ namespace CodexLocalDashboard
             lowTokenUsageSince = null;
             lastCaptureAt = captureAt;
 
-            lastTokenRate = null;
+            lastCumulativeToken = null;
             breakBeforeNextTokenPoint = false;
-            hasSourceCounter = false;
-            lastSourceCounter = 0;
-            normalizedCounter = 0;
+            hasTokenSource = false;
+            lastTokenSource = 0;
 
             lastQuotaRemaining = null;
             breakBeforeNextQuotaPoint = false;
@@ -358,13 +315,13 @@ namespace CodexLocalDashboard
 
         private void AppendTokenHoldLocked(DateTimeOffset at)
         {
-            if (!lastTokenRate.HasValue) return;
+            if (!lastCumulativeToken.HasValue) return;
             if (HasLongGap(tokenPoints, at))
             {
                 breakBeforeNextTokenPoint = true;
                 return;
             }
-            AppendTokenPointLocked(at, lastTokenRate.Value, false);
+            AppendTokenPointLocked(at, lastCumulativeToken.Value, false);
         }
 
         private void AppendQuotaHoldLocked(DateTimeOffset at)
@@ -389,7 +346,7 @@ namespace CodexLocalDashboard
         {
             AppendPointLocked(tokenPoints, at, value,
                 forceBreakBefore || breakBeforeNextTokenPoint);
-            lastTokenRate = value;
+            lastCumulativeToken = value;
             breakBeforeNextTokenPoint = false;
             RecalculateTokenAxisLocked(at, false);
         }
@@ -422,27 +379,6 @@ namespace CodexLocalDashboard
             points.Add(new HistoryPoint(at, value, breakBefore));
         }
 
-        private bool TryFindTokenBaselineLocked(DateTimeOffset currentAt,
-            out TokenCounterSample baseline)
-        {
-            baseline = default(TokenCounterSample);
-            var found = false;
-            var bestDifference = double.MaxValue;
-            for (var i = 0; i < tokenSamples.Count - 1; i++)
-            {
-                var candidate = tokenSamples[i];
-                var elapsed = currentAt - candidate.At;
-                if (elapsed < MinimumWindow || elapsed > MaximumWindow) continue;
-                var difference = Math.Abs(elapsed.TotalSeconds -
-                    TargetWindow.TotalSeconds);
-                if (difference >= bestDifference) continue;
-                bestDifference = difference;
-                baseline = candidate;
-                found = true;
-            }
-            return found;
-        }
-
         private bool TryFindQuotaBaselineLocked(DateTimeOffset currentAt,
             out QuotaRawSample baseline)
         {
@@ -466,17 +402,7 @@ namespace CodexLocalDashboard
 
         private void PruneRawSamplesLocked(DateTimeOffset now)
         {
-            PruneTokenSamplesLocked(now);
             PruneQuotaSamplesLocked(now);
-        }
-
-        private void PruneTokenSamplesLocked(DateTimeOffset now)
-        {
-            var oldest = now - MaximumWindow - RawSampleSlack;
-            var count = 0;
-            while (count < tokenSamples.Count && tokenSamples[count].At < oldest)
-                count++;
-            if (count > 0) tokenSamples.RemoveRange(0, count);
         }
 
         private void PruneQuotaSamplesLocked(DateTimeOffset now)
@@ -559,7 +485,6 @@ namespace CodexLocalDashboard
             var selected = new List<HistoryPoint>();
             var visibleFrom = now - DisplayDuration;
             double? current = null;
-            var peak = 0d;
             var segmentStart = 0d;
             var hasSegmentStart = false;
 
@@ -578,7 +503,6 @@ namespace CodexLocalDashboard
             {
                 var point = selected[i];
                 current = point.Value;
-                if (point.Value > peak) peak = point.Value;
                 if (!hasSegmentStart || point.BreakBefore)
                 {
                     segmentStart = point.Value;
@@ -590,10 +514,13 @@ namespace CodexLocalDashboard
             var axisMaximum = mode == UsageChartMode.RemainingQuota
                 ? 100d : Math.Max(MinimumTokenAxisMaximum, tokenAxisMaximum);
             var secondary = 0d;
-            if (mode == UsageChartMode.TokenRate)
-                secondary = peak;
-            else if (current.HasValue && hasSegmentStart)
-                secondary = Math.Max(0d, segmentStart - current.Value);
+            if (current.HasValue && hasSegmentStart)
+            {
+                if (mode == UsageChartMode.RemainingQuota)
+                    secondary = Math.Max(0d, segmentStart - current.Value);
+                else
+                    secondary = Math.Max(0d, current.Value - segmentStart);
+            }
 
             return new RenderSnapshot(mode, selected, axisMinimum,
                 axisMaximum, current, secondary, now);
@@ -653,22 +580,17 @@ namespace CodexLocalDashboard
             {
                 var inset = 2f * geometryScale;
                 var title = snapshot.Mode == UsageChartMode.RemainingQuota
-                    ? "剩余额度" : "Token 速率";
-                graphics.DrawString(title, titleFont, primaryBrush,
-                    new RectangleF(bounds.Left, bounds.Top + inset,
-                        bounds.Width * 0.68f, headerHeight), nearCenter);
+                    ? "剩余额度" : "累计 Token";
 
                 string currentText;
                 if (!snapshot.CurrentValue.HasValue) currentText = "收集中";
                 else if (snapshot.Mode == UsageChartMode.RemainingQuota)
                     currentText = FormatPercent(snapshot.CurrentValue.Value);
                 else
-                    currentText = "当前：" +
-                        FormatRate(snapshot.CurrentValue.Value) + "/分钟";
-                graphics.DrawString(currentText, valueFont, primaryBrush,
-                    new RectangleF(bounds.Left + bounds.Width * 0.66f,
-                        bounds.Top + inset, bounds.Width * 0.34f,
-                        headerHeight), farCenter);
+                    currentText = FormatTokenCount(snapshot.CurrentValue.Value);
+                DrawHeaderPair(graphics, bounds, inset, headerHeight,
+                    title, currentText, titleFont, valueFont,
+                    primaryBrush, geometryScale);
 
                 DrawGrid(graphics, plot, grid, geometryScale);
                 var curveDrawn = snapshot.Points.Count >= 2 &&
@@ -700,15 +622,15 @@ namespace CodexLocalDashboard
                 {
                     if (snapshot.SecondaryValue > 0d)
                     {
-                        graphics.DrawString("峰值 " +
-                            FormatRate(snapshot.SecondaryValue) + "/分钟",
+                        graphics.DrawString("当前段增加 " +
+                            FormatTokenCount(snapshot.SecondaryValue),
                             smallFont, mutedBrush,
                             new RectangleF(plot.Left + 3f * geometryScale,
                                 plot.Top + geometryScale, plot.Width * 0.55f,
                                 13f * geometryScale), nearCenter);
                     }
                     graphics.DrawString("上限 " +
-                        FormatRate(snapshot.AxisMaximum) + "/分钟",
+                        FormatTokenCount(snapshot.AxisMaximum),
                         smallFont, mutedBrush,
                         new RectangleF(plot.Left, plot.Top + geometryScale,
                             plot.Width - 3f * geometryScale,
@@ -717,12 +639,60 @@ namespace CodexLocalDashboard
 
                 if (!curveDrawn)
                 {
-                    var status = snapshot.Points.Count == 0
-                        ? "等待首个 60 秒有效窗口"
-                        : "等待第二个连续点位";
+                    string status;
+                    if (snapshot.Mode == UsageChartMode.RemainingQuota)
+                    {
+                        status = snapshot.Points.Count == 0
+                            ? "等待首个 60 秒有效窗口"
+                            : "等待第二个连续点位";
+                    }
+                    else
+                    {
+                        status = snapshot.Points.Count == 0
+                            ? "等待累计数据"
+                            : "等待第二个连续点位";
+                    }
                     graphics.DrawString(status, smallFont, mutedBrush, plot,
                         center);
                 }
+            }
+        }
+
+        private static void DrawHeaderPair(Graphics graphics, RectangleF bounds,
+            float inset, float headerHeight, string title, string value,
+            Font titleFont, Font valueFont, Brush brush, float geometryScale)
+        {
+            var gap = Math.Max(4f, 6f * geometryScale);
+            var valueMeasured = graphics.MeasureString(value, valueFont).Width;
+            var minimumValueWidth = bounds.Width * 0.24f;
+            var maximumValueWidth = bounds.Width * 0.58f;
+            var valueWidth = Math.Max(minimumValueWidth,
+                Math.Min(maximumValueWidth,
+                    valueMeasured + Math.Max(4f, 6f * geometryScale)));
+            var titleWidth = Math.Max(1f, bounds.Width - valueWidth - gap);
+
+            using (var titleFormat = new StringFormat
+            {
+                Alignment = StringAlignment.Near,
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoWrap,
+                Trimming = StringTrimming.EllipsisCharacter
+            })
+            using (var valueFormat = new StringFormat
+            {
+                Alignment = StringAlignment.Far,
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoWrap,
+                Trimming = StringTrimming.EllipsisCharacter
+            })
+            {
+                graphics.DrawString(title, titleFont, brush,
+                    new RectangleF(bounds.Left, bounds.Top + inset,
+                        titleWidth, headerHeight), titleFormat);
+                graphics.DrawString(value, valueFont, brush,
+                    new RectangleF(bounds.Right - valueWidth,
+                        bounds.Top + inset, valueWidth, headerHeight),
+                    valueFormat);
             }
         }
 
@@ -750,9 +720,7 @@ namespace CodexLocalDashboard
             RenderSnapshot snapshot, Color lineColor, Color fillColor,
             float geometryScale)
         {
-            var from = snapshot.Points.Count > 0
-                ? snapshot.Points[0].At
-                : snapshot.Now - DisplayDuration;
+            var from = snapshot.Now - DisplayDuration;
             var seconds = DisplayDuration.TotalSeconds;
             var segments = new List<List<PlotPoint>>();
             List<PlotPoint> segment = null;
@@ -1040,15 +1008,22 @@ namespace CodexLocalDashboard
             return left.Value.Equals(right.Value);
         }
 
-        private static string FormatRate(double value)
+        private static string FormatTokenCount(double value)
         {
-            if (value >= 1000000000d)
+            var absolute = Math.Abs(value);
+            if (absolute >= 1000000000000000d)
+                return (value / 1000000000000000d).ToString("0.##",
+                    CultureInfo.InvariantCulture) + "P";
+            if (absolute >= 1000000000000d)
+                return (value / 1000000000000d).ToString("0.##",
+                    CultureInfo.InvariantCulture) + "T";
+            if (absolute >= 1000000000d)
                 return (value / 1000000000d).ToString("0.##",
                     CultureInfo.InvariantCulture) + "B";
-            if (value >= 1000000d)
+            if (absolute >= 1000000d)
                 return (value / 1000000d).ToString("0.##",
                     CultureInfo.InvariantCulture) + "M";
-            if (value >= 1000d)
+            if (absolute >= 1000d)
                 return (value / 1000d).ToString("0.#",
                     CultureInfo.InvariantCulture) + "K";
             return Math.Round(value).ToString("N0",
@@ -1070,17 +1045,6 @@ namespace CodexLocalDashboard
                 FormatFlags = StringFormatFlags.NoWrap,
                 Trimming = StringTrimming.EllipsisCharacter
             };
-        }
-
-        private struct TokenCounterSample
-        {
-            public readonly DateTimeOffset At;
-            public readonly long CumulativeTokens;
-            public TokenCounterSample(DateTimeOffset at, long cumulativeTokens)
-            {
-                At = at;
-                CumulativeTokens = cumulativeTokens;
-            }
         }
 
         private struct QuotaRawSample
