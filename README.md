@@ -24,7 +24,7 @@
 
 ## 快速使用
 
-1. 从 [Releases](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/latest) 获取 `CodexLocalQuotaDashboard-v1.1.1.exe`。
+1. 从 [Releases](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/latest) 获取 `CodexLocalQuotaDashboard-v2.0.exe`。
 2. 双击运行，程序会自动扫描 `%USERPROFILE%\.codex\sessions` 和 `archived_sessions`，无需安装和登录。
 3. 仪表盘会显示最近的本地额度快照，以及今日、近 7 天和近 30 天 Token 用量。
 4. 左键点击托盘图标可直接显示缓存快照仪表盘；在仪表盘任意位置点击右键，可切换顶部横条、调整背景透明度或设置开机启动。
@@ -35,7 +35,7 @@
 - **完全本地读取**：扫描 `%USERPROFILE%\.codex\sessions` 和 `archived_sessions`。
 - **额度快照**：显示本地日志中最近记录的额度剩余百分比和重置时间。
 - **额度颜色提示**：进度条按剩余额度在绿、黄绿、琥珀、橙、橙红和红色之间连续渐变。
-- **用量统计**：汇总今日、近 7 天、近 30 天的输入、输出和缓存 Token。
+- **用量统计**：汇总今日、近 7 天和近 30 天的 Token 总量。
 - **桌面仪表盘**：无标题栏的紧凑窗口，支持拖动、四边缩放和整体等比缩放。
 - **Codex 顶部横条**：自动贴附到 Codex 窗口顶部，并保持在 Codex 内容区域前层。
 - **背景透明度调节**：仪表盘和顶部横条共用 0～100 的背景透明度，默认 10（背景 90% 不透明），文字与进度信息保持完全不透明。
@@ -76,7 +76,7 @@ msbuild CodexLocalDashboard.csproj /p:Configuration=Release
   /reference:System.dll /reference:System.Core.dll `
   /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
   /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll `
-  Program.Framework.cs
+  Program.Framework.cs TokenRateChart.cs
 ```
 
 ## 已知限制

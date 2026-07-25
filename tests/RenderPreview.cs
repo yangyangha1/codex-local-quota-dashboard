@@ -17,14 +17,27 @@ namespace CodexLocalDashboard
             using (var form = new DashboardForm(signal))
             using (var output = new Bitmap(900, 560, PixelFormat.Format32bppArgb))
             {
+                var now = DateTimeOffset.Now;
+                var resetAt = now.AddDays(6);
                 var snapshot = new UsageSnapshot(
                     new TokenTotals(21400000, 370000, 18200000),
                     new TokenTotals(88400000, 910000, 70200000),
                     new TokenTotals(194000000, 2100000, 157000000),
                     0,
-                    DateTimeOffset.Now,
-                    new System.Collections.Generic.List<QuotaWindow> { new QuotaWindow(10080, 38, DateTimeOffset.Now.AddDays(6)) });
-                form.ApplyTheme(ThemeMode.Transparent, false);
+                    now,
+                    new System.Collections.Generic.List<QuotaWindow> { new QuotaWindow(10080, 38, resetAt) });
+                var chart = (TokenRateChart)typeof(DashboardForm)
+                    .GetField("tokenRateChart", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(form);
+                var chartStart = now.AddHours(-2);
+                var startingTokens = snapshot.Today.Total - 120L * 138000L;
+                for (var minute = 0; minute < 120; minute++)
+                {
+                    chart.Capture(chartStart.AddMinutes(minute),
+                        startingTokens + minute * 138000L,
+                        63, 10080, resetAt);
+                }
+                form.ApplyTheme(ThemeMode.Light);
                 form.ApplySnapshot(snapshot);
                 if (args.Length > 0 && args[0].StartsWith("--live", StringComparison.Ordinal))
                 {
@@ -38,14 +51,14 @@ namespace CodexLocalDashboard
                         canvas.Visible = false;
                         stripPanel.Visible = true;
                         form.ClientSize = new Size(700, 28);
-                        form.ApplyTheme(ThemeMode.Light, false);
+                        form.ApplyTheme(ThemeMode.Light);
                     }
                     Application.Run(form);
                     return 0;
                 }
                 using (var dashboard = form.CreateLayeredSurfacePreview())
                 using (var strip = new Bitmap(700, 28, PixelFormat.Format32bppPArgb))
-                using (var stripPanel = new QuotaStripPanel { ClientSize = new Size(700, 28), DpiScale = 1f, Theme = ThemeMode.Transparent, Snapshot = snapshot })
+                using (var stripPanel = new QuotaStripPanel { ClientSize = new Size(700, 28), DpiScale = 1f, Theme = ThemeMode.Light, Snapshot = snapshot })
                 using (var graphics = Graphics.FromImage(output))
                 {
                     graphics.Clear(Color.FromArgb(220, 228, 235));
