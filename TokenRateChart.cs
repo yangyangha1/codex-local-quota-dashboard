@@ -36,6 +36,8 @@ namespace CodexLocalDashboard
         private static readonly TimeSpan RawSampleSlack = TimeSpan.FromSeconds(15);
         private static readonly TimeSpan RateSmoothingTime =
             TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan QuotaSmoothingTime =
+            TimeSpan.FromSeconds(20);
         private static readonly TimeSpan AxisShrinkDelay = TimeSpan.FromMinutes(10);
         private static readonly TimeSpan PointBucketDuration =
             TimeSpan.FromSeconds(CaptureIntervalSeconds);
@@ -70,6 +72,7 @@ namespace CodexLocalDashboard
         private bool breakBeforeNextCounterSample;
 
         private double? lastQuotaRemaining;
+        private DateTimeOffset? lastQuotaCalculationAt;
         private bool breakBeforeNextQuotaPoint;
         private bool hasQuotaSource;
         private double lastQuotaSource;
@@ -124,6 +127,7 @@ namespace CodexLocalDashboard
                     lastTokenRate = null;
                     lastRateCalculationAt = null;
                     lastQuotaRemaining = null;
+                    lastQuotaCalculationAt = null;
                     hasQuotaSource = false;
                     breakBeforeNextTokenPoint = true;
                     breakBeforeNextQuotaPoint = true;
@@ -161,6 +165,7 @@ namespace CodexLocalDashboard
                     lastTokenRate = null;
                     lastRateCalculationAt = null;
                     lastQuotaRemaining = null;
+                    lastQuotaCalculationAt = null;
                     hasQuotaSource = false;
                     breakBeforeNextTokenPoint = true;
                     breakBeforeNextQuotaPoint = true;
@@ -364,12 +369,14 @@ namespace CodexLocalDashboard
             if (rise > QuotaJitterTolerance)
             {
                 lastQuotaSource = remaining;
+                lastQuotaCalculationAt = at;
                 AppendQuotaHoldLocked(at);
                 return;
             }
 
             lastQuotaSource = remaining;
-            AppendQuotaPointLocked(at, remaining, false);
+            AppendQuotaPointLocked(at,
+                StabilizeQuotaLocked(at, remaining), false);
         }
 
         private void StartQuotaWindowLocked(DateTimeOffset at, double remaining,
@@ -379,8 +386,30 @@ namespace CodexLocalDashboard
             lastQuotaSource = remaining;
             quotaWindowMinutes = windowMinutes;
             quotaResetsAt = resetsAt;
+            lastQuotaCalculationAt = at;
             AppendQuotaPointLocked(at, remaining,
                 breakBefore || quotaPoints.Count == 0);
+        }
+
+        private double StabilizeQuotaLocked(DateTimeOffset at,
+            double rawRemaining)
+        {
+            if (!lastQuotaRemaining.HasValue ||
+                !lastQuotaCalculationAt.HasValue ||
+                at <= lastQuotaCalculationAt.Value)
+            {
+                lastQuotaCalculationAt = at;
+                return rawRemaining;
+            }
+
+            var elapsedSeconds = (at - lastQuotaCalculationAt.Value)
+                .TotalSeconds;
+            var alpha = 1d - Math.Exp(-elapsedSeconds /
+                QuotaSmoothingTime.TotalSeconds);
+            alpha = Math.Max(0.55d, Math.Min(0.90d, alpha));
+            lastQuotaCalculationAt = at;
+            return lastQuotaRemaining.Value +
+                alpha * (rawRemaining - lastQuotaRemaining.Value);
         }
 
         private void ResetAllLocked(DateTimeOffset? captureAt)
@@ -404,6 +433,7 @@ namespace CodexLocalDashboard
             breakBeforeNextCounterSample = false;
 
             lastQuotaRemaining = null;
+            lastQuotaCalculationAt = null;
             breakBeforeNextQuotaPoint = false;
             hasQuotaSource = false;
             lastQuotaSource = 0d;
@@ -631,8 +661,9 @@ namespace CodexLocalDashboard
             var cumulativePoints = BuildCumulativePointsLocked(timelineStart,
                 now);
 
-            double? currentQuota = null;
-            if (selectedQuota.Count > 0)
+            double? currentQuota = hasQuotaSource
+                ? (double?)lastQuotaSource : null;
+            if (!currentQuota.HasValue && selectedQuota.Count > 0)
                 currentQuota = selectedQuota[selectedQuota.Count - 1].Value;
 
             var cumulativeIncrease = CalculatePeriodIncreaseLocked(
@@ -785,7 +816,7 @@ namespace CodexLocalDashboard
 
                     primaryDrawn = DrawSeries(graphics, plot,
                         snapshot.QuotaPoints, 100d, snapshot.TimelineStart,
-                        quotaColor, geometryScale, true, true);
+                        quotaColor, geometryScale, true, false);
                     secondaryDrawn = DrawSeries(graphics, plot,
                         snapshot.CumulativePoints,
                         snapshot.CumulativeAxisMaximum,

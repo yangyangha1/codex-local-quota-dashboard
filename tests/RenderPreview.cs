@@ -35,7 +35,7 @@ namespace CodexLocalDashboard
                 {
                     chart.Capture(chartStart.AddMinutes(minute),
                         startingTokens + minute * 138000L,
-                        63, 10080, resetAt);
+                        88d - minute * 25d / 119d, 10080, resetAt);
                 }
                 form.ApplyTheme(ThemeMode.Light);
                 form.ApplySnapshot(snapshot);

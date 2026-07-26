@@ -13,6 +13,7 @@ namespace CodexLocalDashboard
         {
             HiddenCaptureBuildsBothSeries();
             SameDayRollbackDoesNotCreateRateSpike();
+            QuotaSmoothingAvoidsVisualBreaks();
             UnitsScaleAutomatically();
             CompactDualChartDraws();
             Console.WriteLine(failures == 0 ? "PASS" : "FAILURES=" + failures);
@@ -97,6 +98,32 @@ namespace CodexLocalDashboard
                 Field<double>(snapshot, "CumulativeIncrease"));
         }
 
+        private static void QuotaSmoothingAvoidsVisualBreaks()
+        {
+            var chart = new TokenRateChart();
+            var start = new DateTimeOffset(2026, 7, 26, 11, 30, 5,
+                TimeSpan.FromHours(8));
+            var reset = start.AddHours(6);
+            chart.Capture(start, 1000, 83, 360, reset);
+            chart.Capture(start.AddSeconds(30), 1100, 83, 360, reset);
+            chart.Capture(start.AddSeconds(60), 1200, 79, 360, reset);
+            chart.Capture(start.AddSeconds(90), 1300, 79, 360, reset);
+
+            var snapshot = Snapshot(chart, start.AddSeconds(90));
+            var quotas = Points(snapshot, "QuotaPoints");
+            Equal("quota-keeps-30s-points", 4, quotas.Count);
+            Equal("quota-normal-samples-stay-connected", false,
+                PointBreakBefore(quotas[1]));
+            Equal("quota-drop-is-smoothed", true,
+                PointValue(quotas[2]) > 79d &&
+                PointValue(quotas[2]) < 83d);
+            Equal("quota-smoothing-converges", true,
+                PointValue(quotas[3]) < PointValue(quotas[2]) &&
+                PointValue(quotas[3]) > 79d);
+            Equal("quota-header-keeps-raw-value", 79d,
+                Field<double?>(snapshot, "CurrentQuota").Value);
+        }
+
         private static void UnitsScaleAutomatically()
         {
             var method = typeof(TokenRateChart).GetMethod("FormatTokenCount",
@@ -152,6 +179,12 @@ namespace CodexLocalDashboard
         private static int PointSampleCount(object point)
         {
             return (int)point.GetType().GetField("SampleCount")
+                .GetValue(point);
+        }
+
+        private static bool PointBreakBefore(object point)
+        {
+            return (bool)point.GetType().GetField("BreakBefore")
                 .GetValue(point);
         }
 
