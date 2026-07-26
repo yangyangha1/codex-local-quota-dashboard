@@ -14,6 +14,8 @@ namespace CodexLocalDashboard
             HiddenCaptureBuildsBothSeries();
             SameDayRollbackDoesNotCreateRateSpike();
             QuotaSmoothingAvoidsVisualBreaks();
+            QuotaConsumptionCountsRuntimeDrops();
+            TokenAxisKeepsPeakNearEightyFivePercent();
             UnitsScaleAutomatically();
             CompactDualChartDraws();
             Console.WriteLine(failures == 0 ? "PASS" : "FAILURES=" + failures);
@@ -56,6 +58,9 @@ namespace CodexLocalDashboard
                 PointAt(cumulative[0]));
             Equal("period-increase", 700d,
                 Field<double>(snapshot, "CumulativeIncrease"));
+            Equal("runtime-quota-consumption", 4d,
+                Field<double>(snapshot,
+                    "QuotaConsumedDuringRuntime"));
             Equal("timeline-starts-at-first-capture", start,
                 Field<DateTimeOffset>(snapshot, "TimelineStart"));
             var latestRate = PointValue(tokens[tokens.Count - 1]);
@@ -122,6 +127,51 @@ namespace CodexLocalDashboard
                 PointValue(quotas[3]) > 79d);
             Equal("quota-header-keeps-raw-value", 79d,
                 Field<double?>(snapshot, "CurrentQuota").Value);
+            Equal("quota-runtime-drop-is-counted", 4d,
+                Field<double>(snapshot,
+                    "QuotaConsumedDuringRuntime"));
+        }
+
+        private static void QuotaConsumptionCountsRuntimeDrops()
+        {
+            var chart = new TokenRateChart();
+            var start = new DateTimeOffset(2026, 7, 26, 11, 45, 5,
+                TimeSpan.FromHours(8));
+            var reset = start.AddHours(6);
+            chart.Capture(start, 1000, 80, 360, reset);
+            chart.Capture(start.AddSeconds(30), 1100, 78, 360, reset);
+            chart.Capture(start.AddSeconds(60), 1200, 79, 360, reset);
+            chart.Capture(start.AddSeconds(90), 1300, 77, 360, reset);
+            chart.Capture(start.AddSeconds(120), 1400, 100, 360,
+                reset.AddHours(6));
+            chart.Capture(start.AddSeconds(150), 1500, 98, 360,
+                reset.AddHours(6));
+
+            var snapshot = Snapshot(chart, start.AddSeconds(150));
+            Equal("quota-bounce-is-not-double-counted", 5d,
+                Field<double>(snapshot,
+                    "QuotaConsumedDuringRuntime"));
+        }
+
+        private static void TokenAxisKeepsPeakNearEightyFivePercent()
+        {
+            var method = typeof(TokenRateChart).GetMethod(
+                "CalculateRoundedTokenAxisMaximum",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            var axis = (double)method.Invoke(null,
+                new object[] { 785000d });
+            Equal("token-axis-rounded", 925000d, axis);
+            var ratio = 785000d / axis;
+            Equal("token-peak-near-85-percent", true,
+                ratio >= 0.83d && ratio <= 0.86d);
+
+            var largerAxis = (double)method.Invoke(null,
+                new object[] { 2100000d });
+            Equal("larger-token-axis-rounded", 2500000d,
+                largerAxis);
+            Equal("larger-token-peak-near-85-percent", true,
+                2100000d / largerAxis >= 0.83d &&
+                2100000d / largerAxis <= 0.86d);
         }
 
         private static void UnitsScaleAutomatically()

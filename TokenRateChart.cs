@@ -22,12 +22,11 @@ namespace CodexLocalDashboard
         internal const int CaptureIntervalSeconds = 30;
 
         private const double MinimumTokenAxisMaximum = 1000d;
-        private const double AxisGrowThreshold = 0.90d;
-        private const double AxisHeadroomRatio = 0.75d;
-        private const double AxisShrinkThreshold = 0.35d;
-        private const double AxisShrinkHeadroomRatio = 0.70d;
+        private const double TargetPeakAxisRatio = 0.85d;
+        private const double CumulativeAxisHeadroomRatio = 0.75d;
         private const double QuotaJitterTolerance = 0.35d;
         private const double QuotaResetRiseThreshold = 2d;
+        private const double QuotaConsumptionEpsilon = 0.01d;
 
         private static readonly TimeSpan TargetWindow = TimeSpan.FromSeconds(60);
         private static readonly TimeSpan MinimumWindow =
@@ -37,8 +36,7 @@ namespace CodexLocalDashboard
         private static readonly TimeSpan RateSmoothingTime =
             TimeSpan.FromSeconds(30);
         private static readonly TimeSpan QuotaSmoothingTime =
-            TimeSpan.FromSeconds(20);
-        private static readonly TimeSpan AxisShrinkDelay = TimeSpan.FromMinutes(10);
+            TimeSpan.FromSeconds(60);
         private static readonly TimeSpan PointBucketDuration =
             TimeSpan.FromSeconds(CaptureIntervalSeconds);
         private static readonly TimeSpan MaximumContinuousGap = TimeSpan.FromMinutes(2);
@@ -57,8 +55,6 @@ namespace CodexLocalDashboard
 
         private byte displayModeValue =
             (byte)UsageChartMode.CumulativeAndQuota;
-        private double tokenAxisMaximum = MinimumTokenAxisMaximum;
-        private DateTimeOffset? lowTokenUsageSince;
         private DateTimeOffset? lastCaptureAt;
         private DateTimeOffset? chartOriginAt;
 
@@ -76,6 +72,8 @@ namespace CodexLocalDashboard
         private bool breakBeforeNextQuotaPoint;
         private bool hasQuotaSource;
         private double lastQuotaSource;
+        private double quotaConsumptionReferenceRemaining;
+        private double quotaConsumedDuringRuntime;
         private int quotaWindowMinutes;
         private DateTimeOffset? quotaResetsAt;
 
@@ -196,7 +194,6 @@ namespace CodexLocalDashboard
             lock (gate)
             {
                 PruneLocked(now);
-                RecalculateTokenAxisLocked(now, false);
                 snapshot = BuildRenderSnapshotLocked(now);
             }
 
@@ -366,6 +363,15 @@ namespace CodexLocalDashboard
                 return;
             }
 
+            if (remaining <
+                quotaConsumptionReferenceRemaining -
+                QuotaConsumptionEpsilon)
+            {
+                quotaConsumedDuringRuntime +=
+                    quotaConsumptionReferenceRemaining - remaining;
+                quotaConsumptionReferenceRemaining = remaining;
+            }
+
             if (rise > QuotaJitterTolerance)
             {
                 lastQuotaSource = remaining;
@@ -384,6 +390,7 @@ namespace CodexLocalDashboard
         {
             hasQuotaSource = true;
             lastQuotaSource = remaining;
+            quotaConsumptionReferenceRemaining = remaining;
             quotaWindowMinutes = windowMinutes;
             quotaResetsAt = resetsAt;
             lastQuotaCalculationAt = at;
@@ -406,7 +413,7 @@ namespace CodexLocalDashboard
                 .TotalSeconds;
             var alpha = 1d - Math.Exp(-elapsedSeconds /
                 QuotaSmoothingTime.TotalSeconds);
-            alpha = Math.Max(0.55d, Math.Min(0.90d, alpha));
+            alpha = Math.Max(0.30d, Math.Min(0.65d, alpha));
             lastQuotaCalculationAt = at;
             return lastQuotaRemaining.Value +
                 alpha * (rawRemaining - lastQuotaRemaining.Value);
@@ -418,8 +425,6 @@ namespace CodexLocalDashboard
             counterHistory.Clear();
             tokenPoints.Clear();
             quotaPoints.Clear();
-            tokenAxisMaximum = MinimumTokenAxisMaximum;
-            lowTokenUsageSince = null;
             lastCaptureAt = captureAt;
             chartOriginAt = captureAt;
 
@@ -437,6 +442,8 @@ namespace CodexLocalDashboard
             breakBeforeNextQuotaPoint = false;
             hasQuotaSource = false;
             lastQuotaSource = 0d;
+            quotaConsumptionReferenceRemaining = 0d;
+            quotaConsumedDuringRuntime = 0d;
             quotaWindowMinutes = 0;
             quotaResetsAt = null;
         }
@@ -477,7 +484,6 @@ namespace CodexLocalDashboard
                 forceBreakBefore || breakBeforeNextTokenPoint);
             lastTokenRate = value;
             breakBeforeNextTokenPoint = false;
-            RecalculateTokenAxisLocked(at, false);
         }
 
         private static void AppendRatePointLocked(List<HistoryPoint> points,
@@ -606,53 +612,6 @@ namespace CodexLocalDashboard
             return chartOriginAt.Value;
         }
 
-        private void RecalculateTokenAxisLocked(DateTimeOffset now, bool force)
-        {
-            var visibleFrom = TimelineStartLocked(now);
-            var peak = 0d;
-            for (var i = 0; i < tokenPoints.Count; i++)
-            {
-                var point = tokenPoints[i];
-                if (point.At < visibleFrom || point.At > now) continue;
-                if (point.Value > peak) peak = point.Value;
-            }
-
-            if (force && peak <= 0d)
-            {
-                tokenAxisMaximum = MinimumTokenAxisMaximum;
-                lowTokenUsageSince = null;
-                return;
-            }
-
-            if (peak > tokenAxisMaximum * AxisGrowThreshold)
-            {
-                tokenAxisMaximum = NiceCeiling(Math.Max(MinimumTokenAxisMaximum,
-                    peak / AxisHeadroomRatio));
-                lowTokenUsageSince = null;
-                return;
-            }
-
-            if (peak < tokenAxisMaximum * AxisShrinkThreshold)
-            {
-                if (!lowTokenUsageSince.HasValue || now < lowTokenUsageSince.Value)
-                {
-                    lowTokenUsageSince = now;
-                    return;
-                }
-                if (now - lowTokenUsageSince.Value < AxisShrinkDelay) return;
-
-                var target = NiceCeiling(Math.Max(MinimumTokenAxisMaximum,
-                    peak / AxisShrinkHeadroomRatio));
-                var reduced = Math.Max(target,
-                    PreviousNiceStep(tokenAxisMaximum));
-                if (reduced < tokenAxisMaximum) tokenAxisMaximum = reduced;
-                lowTokenUsageSince = now;
-                return;
-            }
-
-            lowTokenUsageSince = null;
-        }
-
         private RenderSnapshot BuildRenderSnapshotLocked(DateTimeOffset now)
         {
             var timelineStart = TimelineStartLocked(now);
@@ -677,12 +636,15 @@ namespace CodexLocalDashboard
                 if (selectedTokens[i].Value > peakRate)
                     peakRate = selectedTokens[i].Value;
             }
+            var tokenAxisMaximum =
+                CalculateRoundedTokenAxisMaximum(peakRate);
 
             return new RenderSnapshot((UsageChartMode)displayModeValue,
                 selectedTokens, selectedQuota, cumulativePoints,
-                Math.Max(MinimumTokenAxisMaximum, tokenAxisMaximum),
+                tokenAxisMaximum,
                 cumulativeAxisMaximum, currentQuota, currentRate, peakRate,
-                cumulativeIncrease, timelineStart, now);
+                cumulativeIncrease, quotaConsumedDuringRuntime,
+                timelineStart, now);
         }
 
         private List<HistoryPoint> BuildCumulativePointsLocked(
@@ -729,7 +691,20 @@ namespace CodexLocalDashboard
             for (var i = 0; i < points.Count; i++)
                 if (points[i].Value > peak) peak = points[i].Value;
             return NiceCeiling(Math.Max(MinimumTokenAxisMaximum,
-                peak / AxisHeadroomRatio));
+                peak / CumulativeAxisHeadroomRatio));
+        }
+
+        private static double CalculateRoundedTokenAxisMaximum(double peak)
+        {
+            if (double.IsNaN(peak) || double.IsInfinity(peak) || peak <= 0d)
+                return MinimumTokenAxisMaximum;
+
+            var target = Math.Max(MinimumTokenAxisMaximum,
+                peak / TargetPeakAxisRatio);
+            var magnitude = Math.Pow(10d,
+                Math.Floor(Math.Log10(target)));
+            var step = Math.Max(MinimumTokenAxisMaximum, magnitude / 20d);
+            return Math.Ceiling(target / step) * step;
         }
 
         private static List<HistoryPoint> SelectPoints(
@@ -804,10 +779,9 @@ namespace CodexLocalDashboard
                 bool secondaryDrawn;
                 if (snapshot.Mode == UsageChartMode.CumulativeAndQuota)
                 {
-                    var leftText = snapshot.CurrentQuota.HasValue
-                        ? "剩余额度 " +
-                            FormatPercent(snapshot.CurrentQuota.Value)
-                        : "剩余额度 --";
+                    var leftText = "消耗额度 " +
+                        FormatPercent(
+                            snapshot.QuotaConsumedDuringRuntime);
                     var rightText = "累计 Token：" +
                         FormatTokenCount(snapshot.CumulativeIncrease);
                     DrawHeaderPair(graphics, bounds, headerHeight, leftText,
@@ -1176,21 +1150,6 @@ namespace CodexLocalDashboard
             return step * scale;
         }
 
-        private static double PreviousNiceStep(double current)
-        {
-            if (current <= MinimumTokenAxisMaximum)
-                return MinimumTokenAxisMaximum;
-            var exponent = Math.Floor(Math.Log10(current));
-            var scale = Math.Pow(10d, exponent);
-            var normalized = current / scale;
-            double previous;
-            if (normalized > 5d + 0.0001d) previous = 5d * scale;
-            else if (normalized > 2.5d + 0.0001d) previous = 2.5d * scale;
-            else if (normalized > 1d + 0.0001d) previous = 1d * scale;
-            else previous = 5d * scale / 10d;
-            return Math.Max(MinimumTokenAxisMaximum, previous);
-        }
-
         private static bool NullableDateEquals(DateTimeOffset? left,
             DateTimeOffset? right)
         {
@@ -1285,6 +1244,7 @@ namespace CodexLocalDashboard
             public readonly double? CurrentTokenRate;
             public readonly double PeakTokenRate;
             public readonly double CumulativeIncrease;
+            public readonly double QuotaConsumedDuringRuntime;
             public readonly DateTimeOffset TimelineStart;
             public readonly DateTimeOffset Now;
 
@@ -1295,6 +1255,7 @@ namespace CodexLocalDashboard
                 double tokenAxisMaximum, double cumulativeAxisMaximum,
                 double? currentQuota, double? currentTokenRate,
                 double peakTokenRate, double cumulativeIncrease,
+                double quotaConsumedDuringRuntime,
                 DateTimeOffset timelineStart, DateTimeOffset now)
             {
                 Mode = mode;
@@ -1307,6 +1268,7 @@ namespace CodexLocalDashboard
                 CurrentTokenRate = currentTokenRate;
                 PeakTokenRate = peakTokenRate;
                 CumulativeIncrease = cumulativeIncrease;
+                QuotaConsumedDuringRuntime = quotaConsumedDuringRuntime;
                 TimelineStart = timelineStart;
                 Now = now;
             }
