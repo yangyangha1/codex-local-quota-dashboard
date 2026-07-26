@@ -19,8 +19,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.2.3.0")]
+[assembly: AssemblyFileVersion("1.2.3.0")]
 
 namespace CodexLocalDashboard
 {
@@ -154,7 +154,6 @@ namespace CodexLocalDashboard
             AddMetric("今日", todayValue, 14);
             AddMetric("近 7 天", weekValue, 113);
             AddMetric("近 30 天", monthValue, 212);
-            AddSeparator(14, 160, 292);
 
             CaptureLayout();
             AttachDrag(canvas);
@@ -208,13 +207,26 @@ namespace CodexLocalDashboard
             SetPerPixelLayered(true);
         }
 
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var value = base.CreateParams;
+                value.ExStyle |= unchecked((int)WS_EX_TOOLWINDOW);
+                value.ExStyle &= ~unchecked((int)WS_EX_APPWINDOW);
+                return value;
+            }
+        }
+
         private void ApplyCornerPreference()
         {
             if (!IsHandleCreated) return;
             try
             {
-                var cornerPreference = !stripMode && Environment.OSVersion.Version.Build >= 22000 ? 3 : 1;
-                DwmSetWindowAttribute(Handle, 33, ref cornerPreference, sizeof(int));
+                var cornerPreference = !stripMode &&
+                    Environment.OSVersion.Version.Build >= 22000 ? 2 : 1;
+                DwmSetWindowAttribute(Handle, 33, ref cornerPreference,
+                    sizeof(int));
             }
             catch { }
         }
@@ -344,12 +356,12 @@ namespace CodexLocalDashboard
                 var snapshot = await Task.Run(new Func<UsageSnapshot>(scanner.Scan), refreshCancellation.Token);
                 if (refreshCancellation.IsCancellationRequested || IsDisposed) return;
                 ApplySnapshot(snapshot);
-                secondsRemaining = 30;
+                secondsRemaining = TokenRateChart.CaptureIntervalSeconds;
                 TrimInitialWorkingSet();
             }
             catch (OperationCanceledException)
             {
-                secondsRemaining = 30;
+                secondsRemaining = TokenRateChart.CaptureIntervalSeconds;
             }
             catch (Exception)
             {
@@ -360,7 +372,7 @@ namespace CodexLocalDashboard
                     tips.SetToolTip(quotaTitle, string.Empty);
                     RenderLayeredSurface();
                 }
-                secondsRemaining = 30;
+                secondsRemaining = TokenRateChart.CaptureIntervalSeconds;
             }
             finally { refreshing = false; }
         }
@@ -686,7 +698,17 @@ namespace CodexLocalDashboard
                 var layeredBackground = stripMode
                     ? (darkBackground ? Color.FromArgb(20, 20, 20) : Color.FromArgb(244, 244, 242))
                     : (darkBackground ? Color.FromArgb(26, 34, 37) : Color.FromArgb(236, 245, 250));
-                using (var backgroundLayer = new SolidBrush(Color.FromArgb(BackgroundAlpha, layeredBackground))) graphics.FillRectangle(backgroundLayer, 0, 0, bitmap.Width, bitmap.Height);
+                using (var backgroundLayer = new SolidBrush(
+                    Color.FromArgb(BackgroundAlpha, layeredBackground)))
+                {
+                    if (stripMode)
+                        graphics.FillRectangle(backgroundLayer, 0, 0,
+                            bitmap.Width, bitmap.Height);
+                    else
+                        FillHighQualityRoundedBackground(graphics,
+                            new RectangleF(0, 0, bitmap.Width, bitmap.Height),
+                            Math.Max(6f, 9f * dpiScale), backgroundLayer);
+                }
                 if (stripMode)
                 {
                     stripPanel.DrawLayered(graphics);
@@ -718,20 +740,52 @@ namespace CodexLocalDashboard
                     continue;
                 }
                 if (control is Panel)
+                {
                     using (var divider = new SolidBrush(Color.FromArgb(110, control.BackColor))) graphics.FillRectangle(divider, bounds);
+                }
             }
 
-            // Fixed six-hour click-switch chart. It shares the existing layered-window render
-            // path and does not own a Timer, thread, file, registry value or cache.
+            // Fixed six-hour dual-scale chart. Capture is driven by background
+            // refreshes, so switching display modes never loses hidden history.
             var chartScale = canvas.Width / (float)DesignWidth;
             var chartVisualScale = Math.Max(.75f, chartScale / Math.Max(1f, dpiScale));
             var chartBounds = new RectangleF(
                 canvas.Left + 14f * chartScale,
-                canvas.Top + 168f * chartScale,
+                canvas.Top + 156f * chartScale,
                 292f * chartScale,
-                171f * chartScale);
+                183f * chartScale);
             tokenRateChart.Draw(graphics, chartBounds, CurrentTheme,
                 DateTimeOffset.Now, chartVisualScale);
+        }
+
+        private static void FillHighQualityRoundedBackground(Graphics graphics,
+            RectangleF bounds, float radius, Brush brush)
+        {
+            var inset = 0.5f;
+            var rect = RectangleF.FromLTRB(bounds.Left + inset,
+                bounds.Top + inset, bounds.Right - inset,
+                bounds.Bottom - inset);
+            var diameter = Math.Min(radius * 2f,
+                Math.Min(rect.Width, rect.Height));
+            if (diameter < 2f)
+            {
+                graphics.FillRectangle(brush, rect);
+                return;
+            }
+
+            using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+            {
+                path.StartFigure();
+                path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+                path.AddArc(rect.Right - diameter, rect.Top, diameter,
+                    diameter, 270, 90);
+                path.AddArc(rect.Right - diameter, rect.Bottom - diameter,
+                    diameter, diameter, 0, 90);
+                path.AddArc(rect.Left, rect.Bottom - diameter, diameter,
+                    diameter, 90, 90);
+                path.CloseFigure();
+                graphics.FillPath(brush, path);
+            }
         }
 
         private void ApplyLayeredBitmap(Bitmap bitmap)
@@ -870,8 +924,8 @@ namespace CodexLocalDashboard
         {
             if (stripMode || canvas.Width <= 0) return false;
             var scale = canvas.Width / (float)DesignWidth;
-            return new RectangleF(14f * scale, 168f * scale,
-                292f * scale, 171f * scale).Contains(point);
+            return new RectangleF(14f * scale, 156f * scale,
+                292f * scale, 183f * scale).Contains(point);
         }
 
         private void BeginDrag(object sender, MouseEventArgs e)

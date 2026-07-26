@@ -39,6 +39,8 @@ namespace CodexLocalDashboard
                 }
                 form.ApplyTheme(ThemeMode.Light);
                 form.ApplySnapshot(snapshot);
+                if (args.Length > 1 && args[1] == "--rate")
+                    chart.ToggleMode();
                 if (args.Length > 0 && args[0].StartsWith("--live", StringComparison.Ordinal))
                 {
                     form.StartPosition = FormStartPosition.Manual;
