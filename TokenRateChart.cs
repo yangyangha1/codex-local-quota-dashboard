@@ -30,7 +30,8 @@ namespace CodexLocalDashboard
         private const double QuotaResetRiseThreshold = 2d;
 
         private static readonly TimeSpan TargetWindow = TimeSpan.FromSeconds(60);
-        private static readonly TimeSpan MinimumWindow = TimeSpan.FromSeconds(45);
+        private static readonly TimeSpan MinimumWindow =
+            TimeSpan.FromSeconds(CaptureIntervalSeconds - 5);
         private static readonly TimeSpan MaximumWindow = TimeSpan.FromSeconds(90);
         private static readonly TimeSpan RawSampleSlack = TimeSpan.FromSeconds(15);
         private static readonly TimeSpan RateSmoothingTime =
@@ -280,7 +281,10 @@ namespace CodexLocalDashboard
                 return;
             }
 
+            var firstCalculatedRate = !lastTokenRate.HasValue;
             var stabilizedRate = StabilizeRateLocked(at, rate);
+            if (firstCalculatedRate)
+                AppendTokenPointLocked(baseline.At, stabilizedRate, false);
             AppendTokenPointLocked(at, stabilizedRate, false);
         }
 

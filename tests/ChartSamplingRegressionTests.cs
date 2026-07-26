@@ -39,7 +39,7 @@ namespace CodexLocalDashboard
             var tokens = Points(snapshot, "TokenPoints");
             var quotas = Points(snapshot, "QuotaPoints");
             var cumulative = Points(snapshot, "CumulativePoints");
-            Equal("hidden-token-history", 3, tokens.Count);
+            Equal("hidden-token-history", 5, tokens.Count);
             Equal("hidden-quota-history", 5, quotas.Count);
             Equal("hidden-cumulative-history", 5, cumulative.Count);
             Equal("token-plot-frequency-is-30s", 30d,
