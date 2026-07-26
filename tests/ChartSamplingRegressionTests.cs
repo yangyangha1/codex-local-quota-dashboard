@@ -160,10 +160,15 @@ namespace CodexLocalDashboard
                 BindingFlags.Static | BindingFlags.NonPublic);
             var axis = (double)method.Invoke(null,
                 new object[] { 785000d });
-            Equal("token-axis-rounded", 925000d, axis);
+            Equal("token-axis-rounded", 900000d, axis);
             var ratio = 785000d / axis;
             Equal("token-peak-near-85-percent", true,
-                ratio >= 0.83d && ratio <= 0.86d);
+                ratio >= 0.84d && ratio <= 0.89d);
+
+            var compactAxis = (double)method.Invoke(null,
+                new object[] { 138000d });
+            Equal("token-axis-uses-100k-step", 200000d,
+                compactAxis);
 
             var largerAxis = (double)method.Invoke(null,
                 new object[] { 2100000d });

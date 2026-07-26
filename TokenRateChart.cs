@@ -23,6 +23,7 @@ namespace CodexLocalDashboard
 
         private const double MinimumTokenAxisMaximum = 1000d;
         private const double TargetPeakAxisRatio = 0.85d;
+        private const double TokenAxisRoundStep = 100000d;
         private const double CumulativeAxisHeadroomRatio = 0.75d;
         private const double QuotaJitterTolerance = 0.35d;
         private const double QuotaResetRiseThreshold = 2d;
@@ -701,10 +702,13 @@ namespace CodexLocalDashboard
 
             var target = Math.Max(MinimumTokenAxisMaximum,
                 peak / TargetPeakAxisRatio);
-            var magnitude = Math.Pow(10d,
-                Math.Floor(Math.Log10(target)));
-            var step = Math.Max(MinimumTokenAxisMaximum, magnitude / 20d);
-            return Math.Ceiling(target / step) * step;
+            var roundedTarget = Math.Round(
+                target / TokenAxisRoundStep,
+                MidpointRounding.AwayFromZero) * TokenAxisRoundStep;
+            var peakCeiling = Math.Ceiling(
+                peak / TokenAxisRoundStep) * TokenAxisRoundStep;
+            return Math.Max(TokenAxisRoundStep,
+                Math.Max(roundedTarget, peakCeiling));
         }
 
         private static List<HistoryPoint> SelectPoints(
