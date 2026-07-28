@@ -20,6 +20,8 @@ namespace CodexLocalDashboard
                 InvalidQuotaIsIgnored(root);
                 DeleteMoveAndTruncate(root);
                 LargeIrrelevantLineIsSkipped(root);
+                ProjectAndSessionTotalsAreLocal(root);
+                SessionDetailsAreLoadedOnlyOnDemand(root);
             }
             finally
             {
@@ -93,6 +95,75 @@ namespace CodexLocalDashboard
             Equal("large-irrelevant-line-does-not-block-following-usage", 10, snapshot.Today.Total);
         }
 
+        private static void ProjectAndSessionTotalsAreLocal(string root)
+        {
+            ResetFolders(root);
+            var projectA = Path.Combine(root, "work", "alpha");
+            var projectB = Path.Combine(root, "work", "beta");
+            File.WriteAllText(Path.Combine(root, "sessions", "one.jsonl"),
+                SessionMetaLine("session-one", projectA) + "\n" +
+                TokenLine(100, 20, 0, 0, 25, true) + "\n", Encoding.UTF8);
+            File.WriteAllText(Path.Combine(root, "sessions", "two.jsonl"),
+                SessionMetaLine("session-two", projectA) + "\n" +
+                TokenLine(200, 30, 0, 0, 25, true) + "\n", Encoding.UTF8);
+            File.WriteAllText(Path.Combine(root, "sessions", "three.jsonl"),
+                SessionMetaLine("session-three", projectB) + "\n" +
+                TokenLine(40, 10, 0, 0, 25, true) + "\n", Encoding.UTF8);
+
+            var snapshot = new UsageScanner(root, true).Scan();
+            Equal("project-group-count", 2, snapshot.Projects.Count);
+            Equal("project-alpha-total", 350, snapshot.Projects[0].TotalTokens);
+            Equal("project-alpha-session-count", 2, snapshot.Projects[0].Sessions.Count);
+            Equal("project-alpha-display-name", "alpha", snapshot.Projects[0].DisplayName);
+            Equal("project-beta-total", 50, snapshot.Projects[1].TotalTokens);
+        }
+
+        private static void SessionDetailsAreLoadedOnlyOnDemand(string root)
+        {
+            ResetFolders(root);
+            var project = Path.Combine(root, "work", "detail");
+            var path = Path.Combine(root, "sessions", "detail.jsonl");
+            var timestamp = DateTimeOffset.Now.ToUniversalTime().ToString("O");
+            File.WriteAllText(path,
+                SessionMetaLine("detail-session", project) + "\n" +
+                "{ \"timestamp\": \"" + timestamp +
+                "\", \"type\": \"event_msg\", \"payload\": { \"type\": \"user_message\" } }\n" +
+                "{ \"timestamp\": \"" + timestamp +
+                "\", \"type\": \"turn_context\", \"payload\": { \"model\": \"gpt-test\", \"effort\": \"high\" } }\n" +
+                "{ \"timestamp\": \"" + timestamp +
+                "\", \"type\": \"function_call\", \"payload\": { \"call_id\": \"call-1\" } }\n" +
+                "{ \"timestamp\": \"" + timestamp +
+                "\", \"type\": \"function_call\", \"payload\": { \"call_id\": \"call-1\" } }\n" +
+                "{ \"timestamp\": \"" + timestamp +
+                "\", \"type\": \"task_complete\", \"payload\": { } }\n" +
+                TokenLine(100, 20, 30, 5, 25, true) + "\n",
+                Encoding.UTF8);
+
+            var lightweight = new UsageScanner(root).Scan();
+            Equal("lightweight-scan-keeps-no-project-objects", 0,
+                lightweight.Projects.Count);
+
+            var detailed = new UsageScanner(root, true).Scan();
+            Equal("detail-project-count", 1, detailed.Projects.Count);
+            var session = detailed.Projects[0].Sessions[0];
+            Equal("detail-turn-count", 1, session.TurnCount);
+            Equal("detail-tool-call-deduplicated", 1,
+                session.ToolCallCount);
+            Equal("detail-model", "gpt-test", session.Model);
+            Equal("detail-effort", "high", session.Effort);
+            Equal("detail-status", "已完成", session.Status);
+            Equal("detail-input", 100, session.InputTokens);
+            Equal("detail-output", 20, session.OutputTokens);
+            Equal("detail-cache", 30, session.CachedTokens);
+        }
+
+        private static string SessionMetaLine(string id, string cwd)
+        {
+            return "{ \"timestamp\": \"" + DateTimeOffset.Now.ToUniversalTime().ToString("O") +
+                "\", \"type\": \"session_meta\", \"payload\": { \"id\": \"" + id +
+                "\", \"cwd\": \"" + cwd.Replace("\\", "\\\\") + "\" } }";
+        }
+
         private static string TokenLine(long input, long output, long cached, long reasoning, double used, bool includeUsed)
         {
             var timestamp = DateTimeOffset.Now.ToUniversalTime().ToString("O");
@@ -119,6 +190,13 @@ namespace CodexLocalDashboard
         private static void Equal(string name, long expected, long actual)
         {
             if (expected == actual) return;
+            failures++;
+            Console.Error.WriteLine(name + ": expected " + expected + ", actual " + actual);
+        }
+
+        private static void Equal(string name, string expected, string actual)
+        {
+            if (string.Equals(expected, actual, StringComparison.Ordinal)) return;
             failures++;
             Console.Error.WriteLine(name + ": expected " + expected + ", actual " + actual);
         }

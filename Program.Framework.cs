@@ -19,8 +19,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.2.5.0")]
-[assembly: AssemblyFileVersion("1.2.5.0")]
+[assembly: AssemblyVersion("1.3.3.0")]
+[assembly: AssemblyFileVersion("1.3.3.0")]
 
 namespace CodexLocalDashboard
 {
@@ -37,20 +37,11 @@ namespace CodexLocalDashboard
         [STAThread]
         private static void Main()
         {
-            bool first;
-            using (var activateSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "CodexLocalDashboard.Activate", out first))
-            {
-                if (!first)
-                {
-                    activateSignal.Set();
-                    return;
-                }
-                try { SetProcessDpiAwarenessContext(new IntPtr(-4)); }
-                catch { try { SetProcessDPIAware(); } catch { } }
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new DashboardForm(activateSignal));
-            }
+            try { SetProcessDpiAwarenessContext(new IntPtr(-4)); }
+            catch { try { SetProcessDPIAware(); } catch { } }
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new DashboardForm());
         }
     }
 
@@ -60,10 +51,11 @@ namespace CodexLocalDashboard
         private const int DesignHeight = 347;
         private readonly UsageScanner scanner = new UsageScanner();
         private readonly TokenRateChart tokenRateChart = new TokenRateChart();
+        private readonly ProjectDetailChart projectDetailChart =
+            new ProjectDetailChart();
         private readonly System.Windows.Forms.Timer countdownTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer followTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer renderThrottleTimer = new System.Windows.Forms.Timer();
-        private RegisteredWaitHandle activationRegistration;
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ToolTip tips = new ToolTip();
         private readonly ContextMenuStrip contextMenu = new ContextMenuStrip();
@@ -107,10 +99,20 @@ namespace CodexLocalDashboard
         private byte backgroundTransparency = 10;
         private bool layeredRenderPending;
         private bool chartClickPending;
+        private bool detailClickPending;
+        private bool detailMode;
+        private CancellationTokenSource detailLoadCancellation;
+        private ProjectDetailPointerHint lastDetailPointerHint;
         private ThemeMode CurrentTheme { get { return (ThemeMode)themeModeValue; } }
         private static readonly uint OwnProcessId = unchecked((uint)Process.GetCurrentProcess().Id);
+        private static int detailMemoryCleanupPending;
 
-        public DashboardForm(EventWaitHandle activateSignal)
+        public DashboardForm()
+            : this(null)
+        {
+        }
+
+        internal DashboardForm(EventWaitHandle unusedActivateSignal)
         {
             Text = "Codex 本地用量";
             using (var graphics = Graphics.FromHwnd(IntPtr.Zero)) dpiScale = Math.Max(1f, graphics.DpiX / 96f);
@@ -145,7 +147,7 @@ namespace CodexLocalDashboard
             stripPanel.DpiScale = dpiScale;
             Controls.Add(stripPanel);
 
-            Add(quotaTitle, 14, 3, 292, 18);
+            Add(quotaTitle, 14, 3, 226, 18);
             Add(quotaValue, 12, 20, 296, 38);
             Add(quotaBar, 14, 60, 292, 6);
             Add(quotaSub, 14, 68, 292, 18);
@@ -157,6 +159,13 @@ namespace CodexLocalDashboard
 
             CaptureLayout();
             AttachDrag(canvas);
+            canvas.MouseLeave += delegate
+            {
+                canvas.Cursor = Cursors.Default;
+                lastDetailPointerHint = ProjectDetailPointerHint.None;
+                tips.SetToolTip(canvas, null);
+            };
+            MouseWheel += HandleChartWheel;
             ConfigureTray();
             renderThrottleTimer.Interval = 66;
             renderThrottleTimer.Tick += delegate
@@ -183,10 +192,6 @@ namespace CodexLocalDashboard
             countdownTimer.Start();
             followTimer.Interval = 250;
             followTimer.Tick += delegate { FollowCodex(); };
-            activationRegistration = ThreadPool.RegisterWaitForSingleObject(activateSignal, delegate
-            {
-                if (!IsDisposed && IsHandleCreated) BeginInvoke(new Action(ShowCurrentMode));
-            }, null, Timeout.Infinite, false);
         }
 
         private Size DpiSize(int width, int height) { return new Size((int)Math.Round(width * dpiScale), (int)Math.Round(height * dpiScale)); }
@@ -296,6 +301,7 @@ namespace CodexLocalDashboard
         private void AttachDrag(Control parent)
         {
             if (!(parent is Button)) { parent.MouseDown += BeginDrag; parent.MouseMove += ContinueDrag; parent.MouseUp += EndDrag; }
+            parent.MouseWheel += HandleChartWheel;
             foreach (Control child in parent.Controls) AttachDrag(child);
         }
 
@@ -722,6 +728,10 @@ namespace CodexLocalDashboard
         {
             foreach (Control control in canvas.Controls)
             {
+                LayoutSpec original;
+                if (detailMode && layout.TryGetValue(control, out original) &&
+                    original.Bounds.Top >= 102)
+                    continue;
                 var bounds = new Rectangle(canvas.Left + control.Left, canvas.Top + control.Top, control.Width, control.Height);
                 var label = control as SmoothLabel;
                 if (label != null)
@@ -745,17 +755,54 @@ namespace CodexLocalDashboard
                 }
             }
 
-            // Fixed six-hour dual-scale chart. Capture is driven by background
-            // refreshes, so switching display modes never loses hidden history.
+            var detailBounds = DetailButtonBounds();
+            var light = CurrentTheme == ThemeMode.Light;
+            using (var border = new Pen(light
+                ? Color.FromArgb(76, 43, 126, 181)
+                : Color.FromArgb(92, 92, 175, 232)))
+            using (var textBrush = new SolidBrush(light
+                ? Color.FromArgb(118, 64, 120, 155)
+                : Color.FromArgb(150, 174, 207, 226)))
+            using (var font = new Font(Ui.FontFamilyName,
+                Math.Max(6f, 7.2f * lastScale), FontStyle.Bold))
+            using (var format = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center
+            })
+            {
+                graphics.DrawRectangle(border, detailBounds.X,
+                    detailBounds.Y, detailBounds.Width - 1,
+                    detailBounds.Height - 1);
+                graphics.DrawString("Detail", font, textBrush,
+                    detailBounds, format);
+            }
+
+            // Both chart modes share one 1h-48h in-memory timeline.
+            // Background capture continues while either mode is hidden.
             var chartScale = canvas.Width / (float)DesignWidth;
             var chartVisualScale = Math.Max(.75f, chartScale / Math.Max(1f, dpiScale));
-            var chartBounds = new RectangleF(
-                canvas.Left + 14f * chartScale,
-                canvas.Top + 156f * chartScale,
-                292f * chartScale,
-                183f * chartScale);
-            tokenRateChart.Draw(graphics, chartBounds, CurrentTheme,
-                DateTimeOffset.Now, chartVisualScale);
+            if (detailMode)
+            {
+                var detailViewBounds = new RectangleF(
+                    canvas.Left + 14f * chartScale,
+                    canvas.Top + 100f * chartScale,
+                    292f * chartScale,
+                    239f * chartScale);
+                projectDetailChart.Draw(graphics, detailViewBounds,
+                    CurrentTheme,
+                    chartVisualScale);
+            }
+            else
+            {
+                var chartBounds = new RectangleF(
+                    canvas.Left + 14f * chartScale,
+                    canvas.Top + 156f * chartScale,
+                    292f * chartScale,
+                    183f * chartScale);
+                tokenRateChart.Draw(graphics, chartBounds, CurrentTheme,
+                    DateTimeOffset.Now, chartVisualScale);
+            }
         }
 
         private static void FillHighQualityRoundedBackground(Graphics graphics,
@@ -924,13 +971,158 @@ namespace CodexLocalDashboard
         {
             if (stripMode || canvas.Width <= 0) return false;
             var scale = canvas.Width / (float)DesignWidth;
-            return new RectangleF(14f * scale, 156f * scale,
-                292f * scale, 183f * scale).Contains(point);
+            return detailMode
+                ? new RectangleF(14f * scale, 100f * scale,
+                    292f * scale, 239f * scale).Contains(point)
+                : new RectangleF(14f * scale, 156f * scale,
+                    292f * scale, 183f * scale).Contains(point);
+        }
+
+        private void SetDetailMode(bool value)
+        {
+            if (detailMode == value) return;
+            detailMode = value;
+            if (value)
+                BeginLoadProjectDetails();
+            else
+            {
+                var releaseAfterCancellation = CancelDetailLoad();
+                projectDetailChart.Clear();
+                lastDetailPointerHint = ProjectDetailPointerHint.None;
+                canvas.Cursor = Cursors.Default;
+                tips.SetToolTip(canvas, null);
+                if (!releaseAfterCancellation)
+                    ReleaseDetailMemoryInBackground();
+            }
+            foreach (Control control in canvas.Controls)
+            {
+                LayoutSpec original;
+                if (layout.TryGetValue(control, out original) &&
+                    original.Bounds.Top >= 102)
+                    control.Visible = !value;
+            }
+        }
+
+        private async void BeginLoadProjectDetails()
+        {
+            CancelDetailLoad();
+            var cancellation = new CancellationTokenSource();
+            detailLoadCancellation = cancellation;
+            projectDetailChart.SetLoading(true);
+            RenderLayeredSurface();
+            try
+            {
+                var snapshot = await Task.Run(
+                    () => new UsageScanner(null, true).Scan(
+                        cancellation.Token), cancellation.Token);
+                if (cancellation.IsCancellationRequested || IsDisposed ||
+                    !detailMode ||
+                    !ReferenceEquals(detailLoadCancellation, cancellation))
+                    return;
+                projectDetailChart.SetProjects(snapshot.Projects);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception)
+            {
+                if (!cancellation.IsCancellationRequested && !IsDisposed &&
+                    detailMode &&
+                    ReferenceEquals(detailLoadCancellation, cancellation))
+                    projectDetailChart.SetLoadError();
+            }
+            finally
+            {
+                if (ReferenceEquals(detailLoadCancellation, cancellation))
+                {
+                    detailLoadCancellation = null;
+                    if (!IsDisposed && detailMode)
+                    {
+                        projectDetailChart.SetLoading(false);
+                        RenderLayeredSurface();
+                    }
+                }
+                if (cancellation.IsCancellationRequested && !detailMode)
+                    ReleaseDetailMemoryInBackground();
+                cancellation.Dispose();
+            }
+        }
+
+        private bool CancelDetailLoad()
+        {
+            var cancellation = detailLoadCancellation;
+            detailLoadCancellation = null;
+            if (cancellation == null) return false;
+            try { cancellation.Cancel(); }
+            catch (ObjectDisposedException) { }
+            return true;
+        }
+
+        private static void ReleaseDetailMemoryInBackground()
+        {
+            if (Interlocked.Exchange(ref detailMemoryCleanupPending, 1) != 0)
+                return;
+            Task.Run(delegate
+            {
+                try
+                {
+                    GC.Collect(2, GCCollectionMode.Optimized, false);
+                    using (var process = Process.GetCurrentProcess())
+                        EmptyWorkingSet(process.Handle);
+                }
+                catch { }
+                finally
+                {
+                    Interlocked.Exchange(ref detailMemoryCleanupPending, 0);
+                }
+            });
+        }
+
+        private Rectangle DetailButtonBounds()
+        {
+            var scale = canvas.Width / (float)DesignWidth;
+            return Rectangle.Round(new RectangleF(
+                canvas.Left + 249f * scale,
+                canvas.Top + 4f * scale,
+                57f * scale,
+                18f * scale));
+        }
+
+        private bool IsDetailPoint(Point point)
+        {
+            if (stripMode || canvas.Width <= 0) return false;
+            var scale = canvas.Width / (float)DesignWidth;
+            return new RectangleF(249f * scale, 4f * scale,
+                57f * scale, 18f * scale).Contains(point);
+        }
+
+        private void HandleChartWheel(object sender, MouseEventArgs e)
+        {
+            if (stripMode) return;
+            var source = sender as Control;
+            if (source == null) return;
+            var point = canvas.PointToClient(
+                source.PointToScreen(e.Location));
+            if (!IsChartPoint(point)) return;
+            if (detailMode)
+            {
+                if (projectDetailChart.Scroll(e.Delta))
+                    RenderLayeredSurface();
+                return;
+            }
+            if (tokenRateChart.ZoomByWheel(e.Delta))
+                RenderLayeredSurface();
         }
 
         private void BeginDrag(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
+            if (ReferenceEquals(sender, canvas) && IsDetailPoint(e.Location))
+            {
+                detailClickPending = true;
+                chartClickPending = false;
+                dragging = false;
+                canvas.Capture = true;
+                return;
+            }
             if (ReferenceEquals(sender, canvas) && IsChartPoint(e.Location))
             {
                 chartClickPending = true;
@@ -938,6 +1130,7 @@ namespace CodexLocalDashboard
                 canvas.Capture = true;
                 return;
             }
+            detailClickPending = false;
             chartClickPending = false;
             dragging = true;
             dragOrigin = Cursor.Position;
@@ -945,6 +1138,40 @@ namespace CodexLocalDashboard
 
         private void ContinueDrag(object sender, MouseEventArgs e)
         {
+            if (!dragging)
+            {
+                var source = sender as Control;
+                if (source != null)
+                {
+                    var local = canvas.PointToClient(
+                        source.PointToScreen(e.Location));
+                    var hint = IsDetailPoint(local)
+                        ? ProjectDetailPointerHint.DetailButton
+                        : detailMode
+                            ? projectDetailChart.PointerHint(
+                                new PointF(canvas.Left + local.X,
+                                    canvas.Top + local.Y))
+                            : ProjectDetailPointerHint.None;
+                    if (hint != lastDetailPointerHint)
+                    {
+                        lastDetailPointerHint = hint;
+                        canvas.Cursor = hint == ProjectDetailPointerHint.None
+                            ? Cursors.Default : Cursors.Hand;
+                        tips.SetToolTip(canvas,
+                            hint == ProjectDetailPointerHint.Close
+                                ? "关闭用量明细"
+                                : hint ==
+                                    ProjectDetailPointerHint.OpenFolder
+                                    ? "打开项目文件夹"
+                                    : hint ==
+                                        ProjectDetailPointerHint.DetailButton
+                                        ? (detailMode
+                                            ? "关闭用量明细"
+                                            : "查看用量明细")
+                                        : null);
+                    }
+                }
+            }
             if (!dragging) return;
             var p = Cursor.Position;
             Location = new Point(Location.X + p.X - dragOrigin.X,
@@ -954,6 +1181,20 @@ namespace CodexLocalDashboard
 
         private void EndDrag(object sender, MouseEventArgs e)
         {
+            if (detailClickPending)
+            {
+                var showDetail = ReferenceEquals(sender, canvas) &&
+                    IsDetailPoint(e.Location);
+                detailClickPending = false;
+                dragging = false;
+                canvas.Capture = false;
+                if (showDetail)
+                {
+                    SetDetailMode(!detailMode);
+                    RenderLayeredSurface();
+                }
+                return;
+            }
             if (chartClickPending)
             {
                 var switchMode = ReferenceEquals(sender, canvas) &&
@@ -963,7 +1204,15 @@ namespace CodexLocalDashboard
                 canvas.Capture = false;
                 if (switchMode)
                 {
-                    tokenRateChart.ToggleMode();
+                    if (detailMode)
+                    {
+                        var result = projectDetailChart.HandleClick(
+                            new PointF(canvas.Left + e.X,
+                                canvas.Top + e.Y));
+                        if (result == ProjectDetailClickResult.Close)
+                            SetDetailMode(false);
+                    }
+                    else tokenRateChart.ToggleMode();
                     RenderLayeredSurface();
                 }
                 return;
@@ -999,7 +1248,8 @@ namespace CodexLocalDashboard
                 return;
             }
             refreshCancellation.Cancel();
-            if (activationRegistration != null) activationRegistration.Unregister(null);
+            CancelDetailLoad();
+            projectDetailChart.Clear();
             countdownTimer.Stop();
             followTimer.Stop();
             renderThrottleTimer.Stop();
@@ -1395,33 +1645,47 @@ namespace CodexLocalDashboard
         private static readonly TimeSpan ArchivedDiscoveryInterval = TimeSpan.FromMinutes(5);
         private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 };
         private readonly string codexRoot;
+        private readonly bool includeSessionDetails;
 
-        public UsageScanner() : this(null) { }
-        internal UsageScanner(string rootOverride)
+        public UsageScanner() : this(null, false) { }
+        internal UsageScanner(string rootOverride) : this(rootOverride, false)
+        {
+        }
+        internal UsageScanner(string rootOverride, bool includeDetails)
         {
             codexRoot = rootOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+            includeSessionDetails = includeDetails;
         }
 
         public UsageSnapshot Scan()
         {
+            return Scan(CancellationToken.None);
+        }
+
+        public UsageSnapshot Scan(CancellationToken cancellationToken)
+        {
             lock (gate)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var scanAt = DateTimeOffset.Now;
                 var scanArchived = scanAt >= nextArchivedDiscovery;
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var sessionsFolder = Path.Combine(codexRoot, "sessions");
                 var archivedFolder = Path.Combine(codexRoot, "archived_sessions");
-                var sessionsComplete = DiscoverFolder(sessionsFolder, seen);
+                var sessionsComplete = DiscoverFolder(sessionsFolder, seen,
+                    cancellationToken);
                 var archivedComplete = true;
                 if (scanArchived)
                 {
-                    archivedComplete = DiscoverFolder(archivedFolder, seen);
+                    archivedComplete = DiscoverFolder(archivedFolder, seen,
+                        cancellationToken);
                     if (archivedComplete)
                         nextArchivedDiscovery = scanAt + ArchivedDiscoveryInterval;
                 }
                 else
                 {
-                    RefreshKnownArchivedFiles(archivedFolder, seen);
+                    RefreshKnownArchivedFiles(archivedFolder, seen,
+                        cancellationToken);
                 }
 
                 var sessionsPrefix = sessionsFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
@@ -1433,7 +1697,8 @@ namespace CodexLocalDashboard
                     : new List<string>();
                 if (!scanArchived && staleSessionPaths.Count > 0)
                 {
-                    archivedComplete = DiscoverFolder(archivedFolder, seen);
+                    archivedComplete = DiscoverFolder(archivedFolder, seen,
+                        cancellationToken);
                     if (archivedComplete)
                         nextArchivedDiscovery = scanAt + ArchivedDiscoveryInterval;
                 }
@@ -1460,27 +1725,28 @@ namespace CodexLocalDashboard
                 }
                 var oldest = DateTime.Now.Date.AddDays(-35);
                 foreach (var date in daily.Keys.Where(date => date < oldest).ToList()) daily.Remove(date);
+                foreach (var state in states.Values)
+                    foreach (var date in state.ByDay.Keys.Where(date => date < oldest).ToList())
+                        state.ByDay.Remove(date);
+                cancellationToken.ThrowIfCancellationRequested();
                 return BuildSnapshot();
             }
         }
 
-        private bool DiscoverFolder(string folder, HashSet<string> seen)
+        private bool DiscoverFolder(string folder, HashSet<string> seen,
+            CancellationToken cancellationToken)
         {
             if (!Directory.Exists(folder)) return true;
             try
             {
                 foreach (var file in Directory.EnumerateFiles(folder, "*.jsonl", SearchOption.AllDirectories))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     try
                     {
                         seen.Add(file);
                         var info = new FileInfo(file);
-                        if (info.LastWriteTime < DateTime.Now.AddDays(-35))
-                        {
-                            seen.Remove(file);
-                            continue;
-                        }
-                        ProcessFile(file, info.Length);
+                        ProcessFile(file, info.Length, cancellationToken);
                     }
                     catch (FileNotFoundException) { seen.Remove(file); }
                     catch (DirectoryNotFoundException) { seen.Remove(file); }
@@ -1493,19 +1759,21 @@ namespace CodexLocalDashboard
             catch (UnauthorizedAccessException) { return false; }
         }
 
-        private void RefreshKnownArchivedFiles(string folder, HashSet<string> seen)
+        private void RefreshKnownArchivedFiles(string folder,
+            HashSet<string> seen, CancellationToken cancellationToken)
         {
             var prefix = folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                 + Path.DirectorySeparatorChar;
             foreach (var path in states.Keys.Where(item =>
                 item.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     var info = new FileInfo(path);
-                    if (!info.Exists || info.LastWriteTime < DateTime.Now.AddDays(-35)) continue;
+                    if (!info.Exists) continue;
                     seen.Add(path);
-                    ProcessFile(path, info.Length);
+                    ProcessFile(path, info.Length, cancellationToken);
                 }
                 catch (FileNotFoundException) { }
                 catch (DirectoryNotFoundException) { }
@@ -1514,11 +1782,12 @@ namespace CodexLocalDashboard
             }
         }
 
-        private void ProcessFile(string path, long length)
+        private void ProcessFile(string path, long length,
+            CancellationToken cancellationToken)
         {
             FileState state;
-            if (!states.TryGetValue(path, out state)) { state = new FileState(); states[path] = state; }
-            if (length < state.Offset) { RemoveContribution(state); state = new FileState(); states[path] = state; }
+            if (!states.TryGetValue(path, out state)) { state = new FileState(path, includeSessionDetails); states[path] = state; }
+            if (length < state.Offset) { RemoveContribution(state); state = new FileState(path, includeSessionDetails); states[path] = state; }
             if (length == state.Offset) return;
             var completeOffset = state.Offset;
             using (var pending = new MemoryStream())
@@ -1529,6 +1798,7 @@ namespace CodexLocalDashboard
                 int read;
                 while ((read = fs.Read(readBuffer, 0, readBuffer.Length)) > 0)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var chunkOffset = fs.Position - read;
                     var segmentStart = 0;
                     for (var i = 0; i < read; i++)
@@ -1573,10 +1843,29 @@ namespace CodexLocalDashboard
             var line = Encoding.UTF8.GetString(bytes, offset, count);
             if (line.Length == 0) return;
             if (line[0] == '\uFEFF') line = line.TrimStart('\uFEFF');
-            if (line.IndexOf("\"token_count\"", StringComparison.Ordinal) < 0) return;
+            var tokenLine = line.IndexOf("\"token_count\"",
+                StringComparison.Ordinal) >= 0;
+            if (!tokenLine && (!includeSessionDetails ||
+                !ContainsSessionDetailMarker(line)))
+                return;
             try { ParseLine(line, state); }
             catch (ArgumentException) { }
             catch (InvalidOperationException) { }
+        }
+
+        private static bool ContainsSessionDetailMarker(string line)
+        {
+            return line.IndexOf("\"session_meta\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"user_message\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"turn_context\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"task_started\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"task_complete\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"turn_aborted\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"function_call\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"custom_tool_call\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"tool_search_call\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"mcp_tool_call_end\"", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("\"web_search_end\"", StringComparison.Ordinal) >= 0;
         }
 
         private void ParseLine(string line, FileState state)
@@ -1584,11 +1873,34 @@ namespace CodexLocalDashboard
             var root = json.DeserializeObject(line) as IDictionary<string, object>;
             if (root == null) return;
             var payload = Object(root, "payload");
+            string rootType;
+            String(root, "type", out rootType);
             string eventType;
-            if (payload == null || !String(payload, "type", out eventType) || !string.Equals(eventType, "token_count", StringComparison.Ordinal)) return;
+            if (payload == null || !String(payload, "type", out eventType))
+                eventType = rootType;
             string timestamp;
-            DateTimeOffset at;
-            if (!String(root, "timestamp", out timestamp) || !DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out at)) return;
+            var at = DateTimeOffset.MinValue;
+            var hasTimestamp = String(root, "timestamp", out timestamp) &&
+                DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out at);
+            if (hasTimestamp) state.ObserveActivity(at);
+
+            if (payload != null &&
+                string.Equals(rootType, "session_meta", StringComparison.Ordinal))
+            {
+                ParseSessionMeta(payload, state, at);
+                return;
+            }
+            if (string.Equals(eventType, "session_meta", StringComparison.Ordinal))
+            {
+                ParseSessionMeta(payload, state, at);
+                return;
+            }
+            if (includeSessionDetails)
+                ParseSessionDetailEvent(eventType, payload ?? root, root,
+                    state);
+            if (!string.Equals(eventType, "token_count", StringComparison.Ordinal)) return;
+            if (!hasTimestamp || payload == null) return;
 
             var info = Object(payload, "info");
             var usage = info == null ? null : Object(info, "total_token_usage");
@@ -1603,6 +1915,8 @@ namespace CodexLocalDashboard
                     var delta = current.DeltaFrom(state.LastTotal); var date = at.LocalDateTime.Date;
                     TokenTotals total; if (!daily.TryGetValue(date, out total)) total = new TokenTotals(); daily[date] = total + delta;
                     TokenTotals own; if (!state.ByDay.TryGetValue(date, out own)) own = new TokenTotals(); state.ByDay[date] = own + delta;
+                    if (includeSessionDetails)
+                        state.AggregateTotal = state.AggregateTotal + delta;
                     state.LastTotal = current; state.LastActivity = at; state.HasUsage = true;
                 }
             }
@@ -1612,6 +1926,77 @@ namespace CodexLocalDashboard
                 var windows = new List<QuotaWindow>(); AddQuota(rateLimits, "primary", windows); AddQuota(rateLimits, "secondary", windows);
                 if (windows.Count > 0) state.LatestQuota = new QuotaSnapshot(at, windows);
             }
+        }
+
+        private static void ParseSessionMeta(IDictionary<string, object> payload,
+            FileState state, DateTimeOffset at)
+        {
+            string cwd;
+            if (String(payload, "cwd", out cwd) && !string.IsNullOrWhiteSpace(cwd))
+                state.ProjectPath = cwd.Trim();
+            string id;
+            if (String(payload, "id", out id) && !string.IsNullOrWhiteSpace(id))
+                state.SessionId = id.Trim();
+            if (at != DateTimeOffset.MinValue) state.ObserveActivity(at);
+        }
+
+        private static void ParseSessionDetailEvent(string eventType,
+            IDictionary<string, object> source,
+            IDictionary<string, object> root, FileState state)
+        {
+            if (string.IsNullOrEmpty(eventType) || source == null) return;
+            if (string.Equals(eventType, "user_message",
+                StringComparison.Ordinal))
+                state.TurnCount++;
+            else if (string.Equals(eventType, "task_started",
+                StringComparison.Ordinal))
+                state.Status = "进行中";
+            else if (string.Equals(eventType, "task_complete",
+                StringComparison.Ordinal))
+                state.Status = "已完成";
+            else if (string.Equals(eventType, "turn_aborted",
+                StringComparison.Ordinal))
+                state.Status = "已中止";
+            else if (string.Equals(eventType, "turn_context",
+                StringComparison.Ordinal))
+            {
+                string value;
+                if (String(source, "model", out value) &&
+                    !string.IsNullOrWhiteSpace(value))
+                    state.Model = value.Trim();
+                if (String(source, "effort", out value) &&
+                    !string.IsNullOrWhiteSpace(value))
+                    state.Effort = value.Trim();
+            }
+
+            if (!IsToolCallEvent(eventType)) return;
+            string callId;
+            if ((!String(source, "call_id", out callId) ||
+                string.IsNullOrWhiteSpace(callId)) &&
+                (!String(root, "call_id", out callId) ||
+                string.IsNullOrWhiteSpace(callId)))
+            {
+                state.ToolCallsWithoutId++;
+                return;
+            }
+            if (state.ToolCallIds == null)
+                state.ToolCallIds = new HashSet<string>(
+                    StringComparer.Ordinal);
+            state.ToolCallIds.Add(callId);
+        }
+
+        private static bool IsToolCallEvent(string eventType)
+        {
+            return string.Equals(eventType, "function_call",
+                    StringComparison.Ordinal) ||
+                string.Equals(eventType, "custom_tool_call",
+                    StringComparison.Ordinal) ||
+                string.Equals(eventType, "tool_search_call",
+                    StringComparison.Ordinal) ||
+                string.Equals(eventType, "mcp_tool_call_end",
+                    StringComparison.Ordinal) ||
+                string.Equals(eventType, "web_search_end",
+                    StringComparison.Ordinal);
         }
 
         private static IDictionary<string, object> Object(IDictionary<string, object> source, string name)
@@ -1675,13 +2060,62 @@ namespace CodexLocalDashboard
             Func<int, TokenTotals> sum = days => daily.Where(x => x.Key >= today.AddDays(-(days - 1)) && x.Key <= today).Aggregate(new TokenTotals(), (a, x) => a + x.Value);
             var weekStart = DateTimeOffset.Now.AddDays(-7);
             var latestQuota = states.Values.Where(state => state.LatestQuota != null).Select(state => state.LatestQuota).OrderByDescending(item => item.At).FirstOrDefault();
-            return new UsageSnapshot(sum(1), sum(7), sum(30), states.Values.Count(s => s.HasUsage && s.LastActivity >= weekStart), latestQuota == null ? DateTimeOffset.MinValue : latestQuota.At, latestQuota == null ? new List<QuotaWindow>() : latestQuota.Windows);
+            var projects = includeSessionDetails ? states.Values
+                .Where(state => state.HasUsage)
+                .GroupBy(state => string.IsNullOrWhiteSpace(state.ProjectPath) ? "未识别项目" : state.ProjectPath, StringComparer.OrdinalIgnoreCase)
+                .Select(group =>
+                {
+                    var sessions = group
+                        .Select(state => new SessionUsage(state.SessionId,
+                            state.AggregateTotal, state.StartedAt,
+                            state.LastActivity, state.TurnCount,
+                            (state.ToolCallIds == null ? 0 :
+                                state.ToolCallIds.Count) +
+                                state.ToolCallsWithoutId,
+                            state.Model, state.Effort, state.Status))
+                        .Where(session => session.TotalTokens > 0)
+                        .OrderByDescending(session => session.TotalTokens)
+                        .ToList();
+                    return new ProjectUsage(group.Key, ProjectDisplayName(group.Key), sessions);
+                })
+                .Where(project => project.TotalTokens > 0)
+                .OrderByDescending(project => project.TotalTokens)
+                .ToList() : new List<ProjectUsage>();
+            return new UsageSnapshot(sum(1), sum(7), sum(30), states.Values.Count(s => s.HasUsage && s.LastActivity >= weekStart), latestQuota == null ? DateTimeOffset.MinValue : latestQuota.At, latestQuota == null ? new List<QuotaWindow>() : latestQuota.Windows, projects);
+        }
+
+        private static string ProjectDisplayName(string path)
+        {
+            if (string.Equals(path, "未识别项目", StringComparison.Ordinal)) return path;
+            try
+            {
+                var trimmed = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var name = Path.GetFileName(trimmed);
+                return string.IsNullOrWhiteSpace(name) ? path : name;
+            }
+            catch (ArgumentException)
+            {
+                return path;
+            }
         }
     }
 
     internal sealed class FileState
     {
-        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota;
+        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public TokenTotals AggregateTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset StartedAt; public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota; public string ProjectPath; public string SessionId; public int TurnCount; public int ToolCallsWithoutId; public HashSet<string> ToolCallIds; public string Model; public string Effort; public string Status;
+        public FileState(string path, bool includeSessionDetails)
+        {
+            if (includeSessionDetails)
+                SessionId = Path.GetFileNameWithoutExtension(path) ??
+                    "未知 session";
+        }
+        public void ObserveActivity(DateTimeOffset at)
+        {
+            if (at == DateTimeOffset.MinValue) return;
+            if (StartedAt == DateTimeOffset.MinValue || at < StartedAt)
+                StartedAt = at;
+            if (at > LastActivity) LastActivity = at;
+        }
     }
     internal sealed class TokenTotals
     {
@@ -1697,9 +2131,37 @@ namespace CodexLocalDashboard
     }
     internal sealed class QuotaWindow { public int WindowMinutes; public double UsedPercent; public DateTimeOffset? ResetsAt; public QuotaWindow(int m, double u, DateTimeOffset? r) { WindowMinutes = m; UsedPercent = u; ResetsAt = r; } }
     internal sealed class QuotaSnapshot { public DateTimeOffset At; public List<QuotaWindow> Windows; public QuotaSnapshot(DateTimeOffset a, List<QuotaWindow> w) { At = a; Windows = w; } }
+    internal sealed class SessionUsage
+    {
+        public string SessionId; public long TotalTokens; public DateTimeOffset StartedAt; public DateTimeOffset LastActivity; public int TurnCount; public int ToolCallCount; public long InputTokens; public long OutputTokens; public long CachedTokens; public long ReasoningTokens; public string Model; public string Effort; public string Status;
+        public SessionUsage(string id, long total, DateTimeOffset lastActivity)
+            : this(id, new TokenTotals(total, 0), lastActivity,
+                lastActivity, 0, 0, null, null, null) { }
+        public SessionUsage(string id, TokenTotals totals,
+            DateTimeOffset startedAt, DateTimeOffset lastActivity,
+            int turnCount, int toolCallCount, string model, string effort,
+            string status)
+        {
+            SessionId = id; InputTokens = totals == null ? 0 : totals.Input;
+            OutputTokens = totals == null ? 0 : totals.Output;
+            CachedTokens = totals == null ? 0 : totals.Cached;
+            ReasoningTokens = totals == null ? 0 : totals.Reasoning;
+            TotalTokens = InputTokens + OutputTokens; StartedAt = startedAt;
+            LastActivity = lastActivity; TurnCount = turnCount;
+            ToolCallCount = toolCallCount; Model = model; Effort = effort;
+            Status = status;
+        }
+    }
+    internal sealed class ProjectUsage
+    {
+        public string ProjectPath; public string DisplayName; public List<SessionUsage> Sessions;
+        public long TotalTokens { get { return Sessions.Sum(session => session.TotalTokens); } }
+        public ProjectUsage(string path, string displayName, List<SessionUsage> sessions) { ProjectPath = path; DisplayName = displayName; Sessions = sessions ?? new List<SessionUsage>(); }
+    }
     internal sealed class UsageSnapshot
     {
-        public TokenTotals Today, Week, Month; public int WeekSessions; public DateTimeOffset QuotaAt; public List<QuotaWindow> Quotas;
-        public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l) { Today = t; Week = w; Month = m; WeekSessions = s; QuotaAt = q; Quotas = l; }
+        public TokenTotals Today, Week, Month; public int WeekSessions; public DateTimeOffset QuotaAt; public List<QuotaWindow> Quotas; public List<ProjectUsage> Projects;
+        public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l) : this(t, w, m, s, q, l, new List<ProjectUsage>()) { }
+        public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l, List<ProjectUsage> projects) { Today = t; Week = w; Month = m; WeekSessions = s; QuotaAt = q; Quotas = l; Projects = projects ?? new List<ProjectUsage>(); }
     }
 }

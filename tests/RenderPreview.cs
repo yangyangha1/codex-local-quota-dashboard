@@ -4,6 +4,7 @@ using System.Drawing.Imaging;
 using System.Threading;
 using System.Reflection;
 using System.Windows.Forms;
+using System.Collections.Generic;
 
 namespace CodexLocalDashboard
 {
@@ -25,7 +26,32 @@ namespace CodexLocalDashboard
                     new TokenTotals(194000000, 2100000, 157000000),
                     0,
                     now,
-                    new System.Collections.Generic.List<QuotaWindow> { new QuotaWindow(10080, 38, resetAt) });
+                    new List<QuotaWindow> { new QuotaWindow(10080, 38, resetAt) },
+                    new List<ProjectUsage>
+                    {
+                        new ProjectUsage(@"D:\work\codex-dashboard", "codex-dashboard",
+                            new List<SessionUsage>
+                            {
+                                new SessionUsage("session-dashboard-a", 24300000, now),
+                                new SessionUsage("session-dashboard-b", 8600000, now.AddMinutes(-12))
+                            }),
+                        new ProjectUsage(@"D:\work\materials-audit", "materials-audit",
+                            new List<SessionUsage>
+                            {
+                                new SessionUsage("session-audit", 18600000, now.AddMinutes(-30))
+                            }),
+                        new ProjectUsage(@"D:\work\notes", "notes",
+                            new List<SessionUsage>
+                            {
+                                new SessionUsage("session-notes", 5100000, now.AddHours(-1))
+                            })
+                    });
+                if (Array.IndexOf(args, "--detail-many") >= 0)
+                    for (var index = 0; index < 20; index++)
+                        snapshot.Projects[0].Sessions.Add(new SessionUsage(
+                            "generated-" + index,
+                            7200000L - index * 210000L,
+                            now.AddMinutes(-index * 17)));
                 var chart = (TokenRateChart)typeof(DashboardForm)
                     .GetField("tokenRateChart", BindingFlags.Instance | BindingFlags.NonPublic)
                     .GetValue(form);
@@ -39,8 +65,41 @@ namespace CodexLocalDashboard
                 }
                 form.ApplyTheme(ThemeMode.Light);
                 form.ApplySnapshot(snapshot);
-                if (args.Length > 1 && args[1] == "--rate")
+                if (Array.IndexOf(args, "--rate") >= 0)
                     chart.ToggleMode();
+                if (Array.IndexOf(args, "--6h") >= 0)
+                {
+                    chart.ZoomByWheel(-120, 1000);
+                    chart.ZoomByWheel(-120, 1250);
+                }
+                if (Array.IndexOf(args, "--12h") >= 0)
+                {
+                    chart.ZoomByWheel(-120, 1000);
+                    chart.ZoomByWheel(-120, 1250);
+                    chart.ZoomByWheel(-120, 1500);
+                }
+                if (Array.IndexOf(args, "--detail") >= 0)
+                {
+                    typeof(DashboardForm).GetField("detailMode",
+                        BindingFlags.Instance | BindingFlags.NonPublic)
+                        .SetValue(form, true);
+                    ((ProjectDetailChart)typeof(DashboardForm).GetField(
+                        "projectDetailChart", BindingFlags.Instance |
+                            BindingFlags.NonPublic).GetValue(form))
+                        .SetProjects(snapshot.Projects);
+                }
+                if (Array.IndexOf(args, "--detail-many") >= 0)
+                {
+                    var detailChart = (ProjectDetailChart)
+                        typeof(DashboardForm).GetField(
+                            "projectDetailChart", BindingFlags.Instance |
+                                BindingFlags.NonPublic).GetValue(form);
+                    var expanded = (HashSet<string>)
+                        typeof(ProjectDetailChart).GetField(
+                            "expandedProjects", BindingFlags.Instance |
+                                BindingFlags.NonPublic).GetValue(detailChart);
+                    expanded.Add(snapshot.Projects[0].ProjectPath);
+                }
                 if (args.Length > 0 && args[0].StartsWith("--live", StringComparison.Ordinal))
                 {
                     form.StartPosition = FormStartPosition.Manual;
@@ -63,6 +122,12 @@ namespace CodexLocalDashboard
                 using (var stripPanel = new QuotaStripPanel { ClientSize = new Size(700, 28), DpiScale = 1f, Theme = ThemeMode.Light, Snapshot = snapshot })
                 using (var graphics = Graphics.FromImage(output))
                 {
+                    if (Array.IndexOf(args, "--dashboard-only") >= 0)
+                    {
+                        dashboard.Save(args.Length > 0 ? args[0] :
+                            "render-preview.png", ImageFormat.Png);
+                        return 0;
+                    }
                     graphics.Clear(Color.FromArgb(220, 228, 235));
                     using (var stripGraphics = Graphics.FromImage(strip))
                     {
