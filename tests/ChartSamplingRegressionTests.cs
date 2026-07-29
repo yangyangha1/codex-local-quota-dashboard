@@ -310,6 +310,8 @@ namespace CodexLocalDashboard
                 sessions.Add(new SessionUsage("unreadable-" + i,
                     1000000 - i * 10000,
                     DateTimeOffset.Now.AddMinutes(-i)));
+            sessions[0].SessionFilePath =
+                @"C:\Users\test\.codex\sessions\session.jsonl";
             var detail = new ProjectDetailChart();
             detail.SetProjects(new List<ProjectUsage>
             {
@@ -349,8 +351,16 @@ namespace CodexLocalDashboard
                     ProjectDetailPointerHint.None,
                     detail.PointerHint(new PointF(100, 76)));
                 Equal("detail-folder-keeps-pointer-hint",
-                    ProjectDetailPointerHint.OpenFolder,
+                    ProjectDetailPointerHint.OpenProjectLocation,
                     detail.PointerHint(new PointF(260, 60)));
+                Equal("detail-session-expands",
+                    ProjectDetailClickResult.Redraw,
+                    detail.HandleClick(new PointF(100, 76)));
+                detail.Draw(graphics, new RectangleF(0, 0, 292, 183),
+                    ThemeMode.Light, 1f);
+                Equal("detail-session-location-keeps-pointer-hint",
+                    ProjectDetailPointerHint.OpenSessionLocation,
+                    detail.PointerHint(new PointF(250, 125)));
                 Equal("detail-close-keeps-pointer-hint",
                     ProjectDetailPointerHint.Close,
                     detail.PointerHint(new PointF(285, 7)));

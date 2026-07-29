@@ -19,8 +19,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.3.3.0")]
-[assembly: AssemblyFileVersion("1.3.3.0")]
+[assembly: AssemblyVersion("1.3.4.0")]
+[assembly: AssemblyFileVersion("1.3.4.0")]
 
 namespace CodexLocalDashboard
 {
@@ -1161,10 +1161,13 @@ namespace CodexLocalDashboard
                             hint == ProjectDetailPointerHint.Close
                                 ? "关闭用量明细"
                                 : hint ==
-                                    ProjectDetailPointerHint.OpenFolder
-                                    ? "打开项目文件夹"
+                                    ProjectDetailPointerHint.OpenProjectLocation
+                                    ? "打开项目位置"
                                     : hint ==
-                                        ProjectDetailPointerHint.DetailButton
+                                        ProjectDetailPointerHint.OpenSessionLocation
+                                        ? "打开 session 文件位置"
+                                        : hint ==
+                                            ProjectDetailPointerHint.DetailButton
                                         ? (detailMode
                                             ? "关闭用量明细"
                                             : "查看用量明细")
@@ -2066,13 +2069,18 @@ namespace CodexLocalDashboard
                 .Select(group =>
                 {
                     var sessions = group
-                        .Select(state => new SessionUsage(state.SessionId,
-                            state.AggregateTotal, state.StartedAt,
-                            state.LastActivity, state.TurnCount,
-                            (state.ToolCallIds == null ? 0 :
-                                state.ToolCallIds.Count) +
-                                state.ToolCallsWithoutId,
-                            state.Model, state.Effort, state.Status))
+                        .Select(state =>
+                        {
+                            var session = new SessionUsage(state.SessionId,
+                                state.AggregateTotal, state.StartedAt,
+                                state.LastActivity, state.TurnCount,
+                                (state.ToolCallIds == null ? 0 :
+                                    state.ToolCallIds.Count) +
+                                    state.ToolCallsWithoutId,
+                                state.Model, state.Effort, state.Status);
+                            session.SessionFilePath = state.SessionFilePath;
+                            return session;
+                        })
                         .Where(session => session.TotalTokens > 0)
                         .OrderByDescending(session => session.TotalTokens)
                         .ToList();
@@ -2102,12 +2110,15 @@ namespace CodexLocalDashboard
 
     internal sealed class FileState
     {
-        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public TokenTotals AggregateTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset StartedAt; public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota; public string ProjectPath; public string SessionId; public int TurnCount; public int ToolCallsWithoutId; public HashSet<string> ToolCallIds; public string Model; public string Effort; public string Status;
+        public long Offset; public TokenTotals LastTotal = new TokenTotals(); public TokenTotals AggregateTotal = new TokenTotals(); public readonly Dictionary<DateTime, TokenTotals> ByDay = new Dictionary<DateTime, TokenTotals>(); public DateTimeOffset StartedAt; public DateTimeOffset LastActivity; public bool HasUsage; public QuotaSnapshot LatestQuota; public string ProjectPath; public string SessionId; public string SessionFilePath; public int TurnCount; public int ToolCallsWithoutId; public HashSet<string> ToolCallIds; public string Model; public string Effort; public string Status;
         public FileState(string path, bool includeSessionDetails)
         {
             if (includeSessionDetails)
+            {
                 SessionId = Path.GetFileNameWithoutExtension(path) ??
                     "未知 session";
+                SessionFilePath = path;
+            }
         }
         public void ObserveActivity(DateTimeOffset at)
         {
@@ -2133,7 +2144,7 @@ namespace CodexLocalDashboard
     internal sealed class QuotaSnapshot { public DateTimeOffset At; public List<QuotaWindow> Windows; public QuotaSnapshot(DateTimeOffset a, List<QuotaWindow> w) { At = a; Windows = w; } }
     internal sealed class SessionUsage
     {
-        public string SessionId; public long TotalTokens; public DateTimeOffset StartedAt; public DateTimeOffset LastActivity; public int TurnCount; public int ToolCallCount; public long InputTokens; public long OutputTokens; public long CachedTokens; public long ReasoningTokens; public string Model; public string Effort; public string Status;
+        public string SessionId; public string SessionFilePath; public long TotalTokens; public DateTimeOffset StartedAt; public DateTimeOffset LastActivity; public int TurnCount; public int ToolCallCount; public long InputTokens; public long OutputTokens; public long CachedTokens; public long ReasoningTokens; public string Model; public string Effort; public string Status;
         public SessionUsage(string id, long total, DateTimeOffset lastActivity)
             : this(id, new TokenTotals(total, 0), lastActivity,
                 lastActivity, 0, 0, null, null, null) { }

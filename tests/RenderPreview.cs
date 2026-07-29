@@ -46,6 +46,8 @@ namespace CodexLocalDashboard
                                 new SessionUsage("session-notes", 5100000, now.AddHours(-1))
                             })
                     });
+                snapshot.Projects[0].Sessions[0].SessionFilePath =
+                    @"C:\Users\test\.codex\sessions\session-dashboard-a.jsonl";
                 if (Array.IndexOf(args, "--detail-many") >= 0)
                     for (var index = 0; index < 20; index++)
                         snapshot.Projects[0].Sessions.Add(new SessionUsage(
@@ -99,6 +101,16 @@ namespace CodexLocalDashboard
                             "expandedProjects", BindingFlags.Instance |
                                 BindingFlags.NonPublic).GetValue(detailChart);
                     expanded.Add(snapshot.Projects[0].ProjectPath);
+                    var expandedSessions = (HashSet<string>)
+                        typeof(ProjectDetailChart).GetField(
+                            "expandedSessions", BindingFlags.Instance |
+                                BindingFlags.NonPublic).GetValue(detailChart);
+                    var firstSession = snapshot.Projects[0].Sessions[0];
+                    expandedSessions.Add(
+                        snapshot.Projects[0].ProjectPath + "\n" +
+                        firstSession.SessionId + "\n" +
+                        firstSession.StartedAt.UtcDateTime.Ticks.ToString(
+                            System.Globalization.CultureInfo.InvariantCulture));
                 }
                 if (args.Length > 0 && args[0].StartsWith("--live", StringComparison.Ordinal))
                 {

@@ -155,6 +155,8 @@ namespace CodexLocalDashboard
             Equal("detail-input", 100, session.InputTokens);
             Equal("detail-output", 20, session.OutputTokens);
             Equal("detail-cache", 30, session.CachedTokens);
+            Equal("detail-session-file-path", path,
+                session.SessionFilePath);
         }
 
         private static string SessionMetaLine(string id, string cwd)
