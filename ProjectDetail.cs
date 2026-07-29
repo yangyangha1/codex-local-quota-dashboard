@@ -42,6 +42,8 @@ namespace CodexLocalDashboard
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private HashSet<string> expandedSessions =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> invalidSessionLocations =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly StringFormat NearFormat = new StringFormat
         {
             Alignment = StringAlignment.Near,
@@ -92,11 +94,14 @@ namespace CodexLocalDashboard
                 StringComparer.OrdinalIgnoreCase);
             expandedSessions = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
+            invalidSessionLocations = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
             closeBounds = RectangleF.Empty;
             scrollOffset = 0f;
             maximumScroll = 0f;
             loading = false;
             loadError = false;
+            invalidSessionLocations.Clear();
         }
 
         public void SetProjects(List<ProjectUsage> value)
@@ -122,7 +127,10 @@ namespace CodexLocalDashboard
                 var area = locationHitAreas[i];
                 if (!area.Bounds.Contains(point)) continue;
                 if (area.IsSessionFile)
-                    OpenSessionFileLocation(area.Path);
+                {
+                    if (!OpenSessionFileLocation(area.Path))
+                        invalidSessionLocations.Add(area.Path);
+                }
                 else
                     OpenFolder(area.Path);
                 return ProjectDetailClickResult.Redraw;
@@ -196,6 +204,8 @@ namespace CodexLocalDashboard
                             contentHeight += sessionDetailHeight;
                 }
             var viewportHeight = Math.Max(1f, bounds.Bottom - contentTop);
+            var contentViewport = new RectangleF(bounds.Left, contentTop,
+                bounds.Width, viewportHeight);
             maximumScroll = Math.Max(0f, contentHeight - viewportHeight);
             scrollOffset = Math.Max(0f,
                 Math.Min(maximumScroll, scrollOffset));
@@ -281,8 +291,11 @@ namespace CodexLocalDashboard
                             ProjectKey(project));
                         var projectBounds = new RectangleF(bounds.Left, y,
                             bounds.Width, projectHeight);
-                        projectHitAreas.Add(new ProjectHitArea(index,
-                            projectBounds));
+                        var visibleProjectBounds = RectangleF.Intersect(
+                            projectBounds, contentViewport);
+                        if (!visibleProjectBounds.IsEmpty)
+                            projectHitAreas.Add(new ProjectHitArea(index,
+                                visibleProjectBounds));
                         if (isExpanded &&
                             projectBounds.Bottom > contentTop &&
                             projectBounds.Top < bounds.Bottom)
@@ -293,6 +306,8 @@ namespace CodexLocalDashboard
                             projectBounds, isExpanded, bodyFont, smallFont,
                             primaryBrush, mutedBrush, trackBrush, blueBrush,
                             blue, geometryScale);
+                        folderBounds = RectangleF.Intersect(folderBounds,
+                            contentViewport);
                         if (isExpanded && !folderBounds.IsEmpty)
                             locationHitAreas.Add(new LocationHitArea(
                                 project.ProjectPath, folderBounds, false));
@@ -311,8 +326,11 @@ namespace CodexLocalDashboard
                                 y, bounds.Width, sessionHeight);
                             var sessionKey = SessionKey(project,
                                 sessions[sessionIndex]);
-                            sessionHitAreas.Add(new SessionHitArea(sessionKey,
-                                sessionBounds));
+                            var visibleSessionBounds = RectangleF.Intersect(
+                                sessionBounds, contentViewport);
+                            if (!visibleSessionBounds.IsEmpty)
+                                sessionHitAreas.Add(new SessionHitArea(
+                                    sessionKey, visibleSessionBounds));
                             DrawSession(graphics, sessions[sessionIndex],
                                 sessionIndex, sessionMaximum, sessionBounds,
                                 smallFont, primaryBrush, mutedBrush,
@@ -333,7 +351,12 @@ namespace CodexLocalDashboard
                                     sessions[sessionIndex],
                                     detailBounds, smallFont, primaryBrush,
                                     mutedBrush, blue, gridPen,
-                                    geometryScale);
+                                    geometryScale,
+                                    !invalidSessionLocations.Contains(
+                                        sessions[sessionIndex]
+                                            .SessionFilePath));
+                                sessionLocationBounds = RectangleF.Intersect(
+                                    sessionLocationBounds, contentViewport);
                                 if (!sessionLocationBounds.IsEmpty)
                                     locationHitAreas.Add(
                                         new LocationHitArea(
@@ -488,7 +511,7 @@ namespace CodexLocalDashboard
         private static RectangleF DrawSessionDetails(Graphics graphics,
             SessionUsage session, RectangleF bounds,
             Font font, Brush primaryBrush, Brush mutedBrush, Color blue,
-            Pen gridPen, float scale)
+            Pen gridPen, float scale, bool locationAvailable)
         {
             var left = bounds.Left + 21f * scale;
             var width = bounds.Width - 25f * scale;
@@ -527,22 +550,28 @@ namespace CodexLocalDashboard
                     13f * scale), NearFormat);
             if (!sessionLocationBounds.IsEmpty)
             {
-                using (var buttonPen = new Pen(Color.FromArgb(125, blue),
+                var buttonColor = locationAvailable ? blue :
+                    Color.FromArgb(130, 140, 151);
+                using (var buttonPen = new Pen(Color.FromArgb(125,
+                    buttonColor),
                     Math.Max(0.65f, 0.8f * scale)))
                 using (var buttonBrush = new SolidBrush(
-                    Color.FromArgb(205, blue)))
+                    Color.FromArgb(205, buttonColor)))
                 {
                     graphics.DrawRectangle(buttonPen,
                         sessionLocationBounds.X, sessionLocationBounds.Y,
                         sessionLocationBounds.Width,
                         sessionLocationBounds.Height);
-                    graphics.DrawString("session位置", font, buttonBrush,
+                    graphics.DrawString(locationAvailable
+                            ? "session位置" : "位置失效",
+                        font, buttonBrush,
                         sessionLocationBounds, CenterFormat);
                 }
             }
             graphics.DrawLine(gridPen, left, bounds.Bottom - scale,
                 bounds.Right - 4f * scale, bounds.Bottom - scale);
-            return sessionLocationBounds;
+            return locationAvailable
+                ? sessionLocationBounds : RectangleF.Empty;
         }
 
         private void DrawScrollbar(Graphics graphics, RectangleF bounds,
@@ -646,27 +675,53 @@ namespace CodexLocalDashboard
             catch { }
         }
 
-        private static void OpenSessionFileLocation(string path)
+        private static bool OpenSessionFileLocation(string path)
         {
-            if (string.IsNullOrWhiteSpace(path)) return;
+            if (string.IsNullOrWhiteSpace(path)) return false;
             try
             {
-                if (File.Exists(path))
+                var resolved = ResolveSessionFilePath(path);
+                if (!string.IsNullOrWhiteSpace(resolved))
                 {
                     Process.Start(new ProcessStartInfo
                     {
                         FileName = "explorer.exe",
                         Arguments = "/select,\"" +
-                            path.Replace("\"", string.Empty) + "\"",
+                            resolved.Replace("\"", string.Empty) + "\"",
                         UseShellExecute = true
                     });
-                    return;
+                    return true;
                 }
                 var folder = Path.GetDirectoryName(path);
                 if (!string.IsNullOrWhiteSpace(folder))
                     OpenFolder(folder);
             }
             catch { }
+            return false;
+        }
+
+        private static string ResolveSessionFilePath(string path)
+        {
+            if (File.Exists(path)) return path;
+            var fileName = Path.GetFileName(path);
+            if (string.IsNullOrWhiteSpace(fileName)) return null;
+            var codexRoot = Path.Combine(
+                Environment.GetFolderPath(
+                    Environment.SpecialFolder.UserProfile), ".codex");
+            foreach (var name in new[] { "sessions", "archived_sessions" })
+            {
+                var folder = Path.Combine(codexRoot, name);
+                if (!Directory.Exists(folder)) continue;
+                try
+                {
+                    var match = Directory.EnumerateFiles(folder, fileName,
+                        SearchOption.AllDirectories).FirstOrDefault();
+                    if (!string.IsNullOrWhiteSpace(match)) return match;
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            return null;
         }
 
         private static string TrimName(Graphics graphics, string value,

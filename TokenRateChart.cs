@@ -46,6 +46,7 @@ namespace CodexLocalDashboard
         private static readonly TimeSpan RetentionSlack = TimeSpan.FromMinutes(2);
         private const int WheelStepDelta = 120;
         private const int WheelDebounceMilliseconds = 200;
+        private const int HistoryPruneBatchSize = 64;
         private static readonly byte[] ZoomLevels = { 1, 2, 3, 6, 12, 24, 48 };
 
         private readonly object gate = new object();
@@ -687,7 +688,8 @@ namespace CodexLocalDashboard
         {
             var count = 0;
             while (count < points.Count && points[count].At < oldest) count++;
-            if (count > 0) points.RemoveRange(0, count);
+            if (count >= HistoryPruneBatchSize || count == points.Count)
+                points.RemoveRange(0, count);
         }
 
         private static void PruneCounterSamples(
@@ -696,7 +698,9 @@ namespace CodexLocalDashboard
             var count = 0;
             while (count + 1 < samples.Count && samples[count + 1].At < oldest)
                 count++;
-            if (count > 0) samples.RemoveRange(0, count);
+            if (count >= HistoryPruneBatchSize ||
+                count == samples.Count - 1)
+                samples.RemoveRange(0, count);
         }
 
         private DateTimeOffset TimelineStartLocked(DateTimeOffset now)

@@ -19,8 +19,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.3.4.0")]
-[assembly: AssemblyFileVersion("1.3.4.0")]
+[assembly: AssemblyVersion("1.3.5.0")]
+[assembly: AssemblyFileVersion("1.3.5.0")]
 
 namespace CodexLocalDashboard
 {
@@ -359,7 +359,9 @@ namespace CodexLocalDashboard
             refreshing = true;
             try
             {
-                var snapshot = await Task.Run(new Func<UsageSnapshot>(scanner.Scan), refreshCancellation.Token);
+                var snapshot = await Task.Run(
+                    () => scanner.Scan(refreshCancellation.Token),
+                    refreshCancellation.Token);
                 if (refreshCancellation.IsCancellationRequested || IsDisposed) return;
                 ApplySnapshot(snapshot);
                 secondsRemaining = TokenRateChart.CaptureIntervalSeconds;
@@ -1012,9 +1014,12 @@ namespace CodexLocalDashboard
             RenderLayeredSurface();
             try
             {
-                var snapshot = await Task.Run(
-                    () => new UsageScanner(null, true).Scan(
-                        cancellation.Token), cancellation.Token);
+                var snapshot = await Task.Run(() =>
+                {
+                    using (var detailScanner =
+                        new UsageScanner(null, true))
+                        return detailScanner.Scan(cancellation.Token);
+                }, cancellation.Token);
                 if (cancellation.IsCancellationRequested || IsDisposed ||
                     !detailMode ||
                     !ReferenceEquals(detailLoadCancellation, cancellation))
@@ -1253,6 +1258,7 @@ namespace CodexLocalDashboard
             refreshCancellation.Cancel();
             CancelDetailLoad();
             projectDetailChart.Clear();
+            scanner.Dispose();
             countdownTimer.Stop();
             followTimer.Stop();
             renderThrottleTimer.Stop();
@@ -1636,7 +1642,7 @@ namespace CodexLocalDashboard
         private static string FormatDuration(double value) { return Math.Abs(value - Math.Round(value)) < .001 ? Math.Round(value).ToString("0") : value.ToString("0.#"); }
     }
 
-    internal sealed class UsageScanner
+    internal sealed class UsageScanner : IDisposable
     {
         private const int ReadBufferSize = 64 * 1024;
         private const int MaxLineBytes = 4 * 1024 * 1024;
@@ -1644,11 +1650,37 @@ namespace CodexLocalDashboard
         private readonly Dictionary<string, FileState> states = new Dictionary<string, FileState>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<DateTime, TokenTotals> daily = new Dictionary<DateTime, TokenTotals>();
         private readonly byte[] readBuffer = new byte[ReadBufferSize];
+        private readonly object watcherGate = new object();
+        private readonly HashSet<string> changedSessionPaths =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private DateTimeOffset nextArchivedDiscovery = DateTimeOffset.MinValue;
+        private DateTimeOffset nextSessionDiscovery = DateTimeOffset.MinValue;
         private static readonly TimeSpan ArchivedDiscoveryInterval = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan SessionDiscoveryInterval =
+            TimeSpan.FromMinutes(5);
+        private static readonly byte[] TokenCountMarker =
+            Encoding.ASCII.GetBytes("\"token_count\"");
+        private static readonly byte[][] SessionDetailMarkers =
+        {
+            Encoding.ASCII.GetBytes("\"session_meta\""),
+            Encoding.ASCII.GetBytes("\"user_message\""),
+            Encoding.ASCII.GetBytes("\"turn_context\""),
+            Encoding.ASCII.GetBytes("\"task_started\""),
+            Encoding.ASCII.GetBytes("\"task_complete\""),
+            Encoding.ASCII.GetBytes("\"turn_aborted\""),
+            Encoding.ASCII.GetBytes("\"function_call\""),
+            Encoding.ASCII.GetBytes("\"custom_tool_call\""),
+            Encoding.ASCII.GetBytes("\"tool_search_call\""),
+            Encoding.ASCII.GetBytes("\"mcp_tool_call_end\""),
+            Encoding.ASCII.GetBytes("\"web_search_end\"")
+        };
         private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 64 };
         private readonly string codexRoot;
         private readonly bool includeSessionDetails;
+        private readonly bool enableSessionWatcher;
+        private FileSystemWatcher sessionWatcher;
+        private int forceSessionDiscovery;
+        private int disposed;
 
         public UsageScanner() : this(null, false) { }
         internal UsageScanner(string rootOverride) : this(rootOverride, false)
@@ -1658,6 +1690,9 @@ namespace CodexLocalDashboard
         {
             codexRoot = rootOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
             includeSessionDetails = includeDetails;
+            enableSessionWatcher = rootOverride == null && !includeDetails;
+            if (enableSessionWatcher)
+                TryStartSessionWatcher();
         }
 
         public UsageSnapshot Scan()
@@ -1675,8 +1710,30 @@ namespace CodexLocalDashboard
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var sessionsFolder = Path.Combine(codexRoot, "sessions");
                 var archivedFolder = Path.Combine(codexRoot, "archived_sessions");
-                var sessionsComplete = DiscoverFolder(sessionsFolder, seen,
-                    cancellationToken);
+                var scanAllSessions = includeSessionDetails ||
+                    sessionWatcher == null ||
+                    scanAt >= nextSessionDiscovery ||
+                    Interlocked.Exchange(ref forceSessionDiscovery, 0) != 0;
+                var sessionsComplete = false;
+                if (scanAllSessions)
+                {
+                    lock (watcherGate) changedSessionPaths.Clear();
+                    sessionsComplete = DiscoverFolder(sessionsFolder, seen,
+                        cancellationToken);
+                    if (sessionsComplete)
+                    {
+                        nextSessionDiscovery =
+                            scanAt + SessionDiscoveryInterval;
+                        if (enableSessionWatcher &&
+                            sessionWatcher == null)
+                            TryStartSessionWatcher();
+                    }
+                }
+                else
+                {
+                    RefreshChangedSessionFiles(sessionsFolder, seen,
+                        cancellationToken);
+                }
                 var archivedComplete = true;
                 if (scanArchived)
                 {
@@ -1734,6 +1791,98 @@ namespace CodexLocalDashboard
                 cancellationToken.ThrowIfCancellationRequested();
                 return BuildSnapshot();
             }
+        }
+
+        private void TryStartSessionWatcher()
+        {
+            if (Volatile.Read(ref disposed) != 0) return;
+            var folder = Path.Combine(codexRoot, "sessions");
+            if (!Directory.Exists(folder)) return;
+            try
+            {
+                sessionWatcher = new FileSystemWatcher(folder, "*.jsonl");
+                sessionWatcher.IncludeSubdirectories = true;
+                sessionWatcher.NotifyFilter = NotifyFilters.FileName |
+                    NotifyFilters.LastWrite | NotifyFilters.Size;
+                sessionWatcher.Changed += OnSessionFileChanged;
+                sessionWatcher.Created += OnSessionFileChanged;
+                sessionWatcher.Deleted += OnSessionFileChanged;
+                sessionWatcher.Renamed += OnSessionFileRenamed;
+                sessionWatcher.Error += delegate
+                {
+                    Interlocked.Exchange(ref forceSessionDiscovery, 1);
+                };
+                sessionWatcher.EnableRaisingEvents = true;
+            }
+            catch (ArgumentException) { DisposeWatcher(); }
+            catch (IOException) { DisposeWatcher(); }
+        }
+
+        private void OnSessionFileChanged(object sender, FileSystemEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(e.FullPath)) return;
+            lock (watcherGate) changedSessionPaths.Add(e.FullPath);
+        }
+
+        private void OnSessionFileRenamed(object sender,
+            RenamedEventArgs e)
+        {
+            lock (watcherGate)
+            {
+                if (!string.IsNullOrWhiteSpace(e.OldFullPath))
+                    changedSessionPaths.Add(e.OldFullPath);
+                if (!string.IsNullOrWhiteSpace(e.FullPath))
+                    changedSessionPaths.Add(e.FullPath);
+            }
+        }
+
+        private void RefreshChangedSessionFiles(string folder,
+            HashSet<string> seen, CancellationToken cancellationToken)
+        {
+            List<string> changed;
+            lock (watcherGate)
+            {
+                changed = changedSessionPaths.ToList();
+                changedSessionPaths.Clear();
+            }
+            var prefix = folder.TrimEnd(Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            foreach (var path in changed)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!path.StartsWith(prefix,
+                    StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    var info = new FileInfo(path);
+                    if (!info.Exists) continue;
+                    seen.Add(path);
+                    ProcessFile(path, info.Length, cancellationToken);
+                }
+                catch (FileNotFoundException) { }
+                catch (DirectoryNotFoundException) { }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref disposed, 1);
+            DisposeWatcher();
+        }
+
+        private void DisposeWatcher()
+        {
+            var watcher = sessionWatcher;
+            sessionWatcher = null;
+            if (watcher == null) return;
+            try
+            {
+                watcher.EnableRaisingEvents = false;
+                watcher.Dispose();
+            }
+            catch (ObjectDisposedException) { }
         }
 
         private bool DiscoverFolder(string folder, HashSet<string> seen,
@@ -1843,32 +1992,65 @@ namespace CodexLocalDashboard
         {
             if (count > 0 && bytes[offset + count - 1] == (byte)'\r') count--;
             if (count <= 0) return;
+            var tokenLine = ContainsBytes(bytes, offset, count,
+                TokenCountMarker);
+            if (!tokenLine && (!includeSessionDetails ||
+                !ContainsAnyBytes(bytes, offset, count,
+                    SessionDetailMarkers)))
+                return;
             var line = Encoding.UTF8.GetString(bytes, offset, count);
             if (line.Length == 0) return;
             if (line[0] == '\uFEFF') line = line.TrimStart('\uFEFF');
-            var tokenLine = line.IndexOf("\"token_count\"",
-                StringComparison.Ordinal) >= 0;
-            if (!tokenLine && (!includeSessionDetails ||
-                !ContainsSessionDetailMarker(line)))
-                return;
             try { ParseLine(line, state); }
             catch (ArgumentException) { }
             catch (InvalidOperationException) { }
         }
 
-        private static bool ContainsSessionDetailMarker(string line)
+        private static bool ContainsAnyBytes(byte[] bytes, int offset,
+            int count, byte[][] markers)
         {
-            return line.IndexOf("\"session_meta\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"user_message\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"turn_context\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"task_started\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"task_complete\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"turn_aborted\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"function_call\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"custom_tool_call\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"tool_search_call\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"mcp_tool_call_end\"", StringComparison.Ordinal) >= 0 ||
-                line.IndexOf("\"web_search_end\"", StringComparison.Ordinal) >= 0;
+            var end = offset + count;
+            for (var i = offset; i < end; i++)
+            {
+                for (var markerIndex = 0;
+                    markerIndex < markers.Length; markerIndex++)
+                {
+                    var marker = markers[markerIndex];
+                    if (marker == null || marker.Length == 0 ||
+                        i + marker.Length > end ||
+                        bytes[i] != marker[0]) continue;
+                    var matched = true;
+                    for (var j = 1; j < marker.Length; j++)
+                    {
+                        if (bytes[i + j] == marker[j]) continue;
+                        matched = false;
+                        break;
+                    }
+                    if (matched) return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool ContainsBytes(byte[] bytes, int offset,
+            int count, byte[] marker)
+        {
+            if (marker == null || marker.Length == 0 ||
+                count < marker.Length) return false;
+            var last = offset + count - marker.Length;
+            for (var i = offset; i <= last; i++)
+            {
+                if (bytes[i] != marker[0]) continue;
+                var matched = true;
+                for (var j = 1; j < marker.Length; j++)
+                {
+                    if (bytes[i + j] == marker[j]) continue;
+                    matched = false;
+                    break;
+                }
+                if (matched) return true;
+            }
+            return false;
         }
 
         private void ParseLine(string line, FileState state)
@@ -2128,10 +2310,11 @@ namespace CodexLocalDashboard
             if (at > LastActivity) LastActivity = at;
         }
     }
-    internal sealed class TokenTotals
+    internal struct TokenTotals
     {
         public long Input, Output, Cached, Reasoning; public long Total { get { return Input + Output; } }
-        public TokenTotals(long input = 0, long output = 0, long cached = 0, long reasoning = 0) { Input = input; Output = output; Cached = cached; Reasoning = reasoning; }
+        public TokenTotals(long input, long output, long cached = 0,
+            long reasoning = 0) { Input = input; Output = output; Cached = cached; Reasoning = reasoning; }
         public TokenTotals DeltaFrom(TokenTotals p)
         {
             var reset = Input < p.Input || Output < p.Output || Cached < p.Cached || Reasoning < p.Reasoning;
@@ -2153,10 +2336,10 @@ namespace CodexLocalDashboard
             int turnCount, int toolCallCount, string model, string effort,
             string status)
         {
-            SessionId = id; InputTokens = totals == null ? 0 : totals.Input;
-            OutputTokens = totals == null ? 0 : totals.Output;
-            CachedTokens = totals == null ? 0 : totals.Cached;
-            ReasoningTokens = totals == null ? 0 : totals.Reasoning;
+            SessionId = id; InputTokens = totals.Input;
+            OutputTokens = totals.Output;
+            CachedTokens = totals.Cached;
+            ReasoningTokens = totals.Reasoning;
             TotalTokens = InputTokens + OutputTokens; StartedAt = startedAt;
             LastActivity = lastActivity; TurnCount = turnCount;
             ToolCallCount = toolCallCount; Model = model; Effort = effort;
