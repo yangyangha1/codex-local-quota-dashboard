@@ -1704,7 +1704,7 @@ namespace CodexLocalDashboard
         {
             if (!preferredWidthDirty) return preferredLogicalWidth;
             var scale = Math.Max(1f, DpiScale);
-            using (var font = new Font(StripFontFamily, 12f,
+            using (var font = new Font(StripFontFamily, 11f,
                 FontStyle.Regular))
             {
                 var data = Snapshot;
@@ -1750,7 +1750,7 @@ namespace CodexLocalDashboard
             var data = Snapshot;
             if (data == null || data.Quotas.Count == 0)
             {
-                using (var font = new Font(StripFontFamily, 12f,
+                using (var font = new Font(StripFontFamily, 11f,
                     FontStyle.Regular))
                 using (var brush = new SolidBrush(menuTextColor))
                 using (var waitingFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
@@ -1764,7 +1764,7 @@ namespace CodexLocalDashboard
             var progressHeight = Math.Max(3f, 4 * scale);
             var progressY = (ClientSize.Height - progressHeight) / 2f;
 
-            using (var normal = new Font(StripFontFamily, 12f,
+            using (var normal = new Font(StripFontFamily, 11f,
                 FontStyle.Regular))
             using (var menuText = new SolidBrush(menuTextColor))
             using (var track = new SolidBrush(layered ? Color.FromArgb(170, trackColor) : trackColor))
