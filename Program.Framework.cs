@@ -1687,7 +1687,6 @@ namespace CodexLocalDashboard
     internal sealed class QuotaStripPanel : Panel
     {
         private const string StripFontFamily = "Microsoft YaHei UI";
-        private const float StripFontPixelsAt96Dpi = 13.333333f;
         private UsageSnapshot snapshot;
         private float dpiScale = 1f;
         private int preferredLogicalWidth = 280;
@@ -1705,7 +1704,8 @@ namespace CodexLocalDashboard
         {
             if (!preferredWidthDirty) return preferredLogicalWidth;
             var scale = Math.Max(1f, DpiScale);
-            using (var font = CreateStripFont(scale))
+            using (var font = new Font(StripFontFamily, 12f,
+                FontStyle.Regular))
             {
                 var data = Snapshot;
                 var leftText = "等待本地限额快照";
@@ -1750,7 +1750,8 @@ namespace CodexLocalDashboard
             var data = Snapshot;
             if (data == null || data.Quotas.Count == 0)
             {
-                using (var font = CreateStripFont(scale))
+                using (var font = new Font(StripFontFamily, 12f,
+                    FontStyle.Regular))
                 using (var brush = new SolidBrush(menuTextColor))
                 using (var waitingFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
                     graphics.DrawString("等待本地限额快照", font, brush, new RectangleF(8 * scale, 0, ClientSize.Width - 16 * scale, ClientSize.Height), waitingFormat);
@@ -1763,7 +1764,8 @@ namespace CodexLocalDashboard
             var progressHeight = Math.Max(3f, 4 * scale);
             var progressY = (ClientSize.Height - progressHeight) / 2f;
 
-            using (var normal = CreateStripFont(scale))
+            using (var normal = new Font(StripFontFamily, 12f,
+                FontStyle.Regular))
             using (var menuText = new SolidBrush(menuTextColor))
             using (var track = new SolidBrush(layered ? Color.FromArgb(170, trackColor) : trackColor))
             using (var accent = new SolidBrush(Ui.QuotaColor(remaining)))
@@ -1782,14 +1784,6 @@ namespace CodexLocalDashboard
                 graphics.FillRectangle(accent, progressX, progressY, (float)(progressWidth * remaining / 100d), progressHeight);
                 graphics.DrawString(reset, normal, menuText, new RectangleF(resetX, 0, resetTextWidth + 2 * scale, ClientSize.Height), centered);
             }
-        }
-
-        private static Font CreateStripFont(float dpiScale)
-        {
-            return new Font(StripFontFamily,
-                Math.Max(StripFontPixelsAt96Dpi,
-                    StripFontPixelsAt96Dpi * Math.Max(1f, dpiScale)),
-                FontStyle.Regular, GraphicsUnit.Pixel);
         }
 
         private static string ShortWindowName(int minutes)
