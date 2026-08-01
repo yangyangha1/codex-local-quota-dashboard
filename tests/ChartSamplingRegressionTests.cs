@@ -22,10 +22,37 @@ namespace CodexLocalDashboard
             CumulativeAxisKeepsPeakNearEightyPercent();
             UnitsScaleAutomatically();
             WheelZoomUsesSharedInMemoryHistory();
+            DashboardSizingKeepsFixedAspectRatio();
             EmbeddedDetailInteractionWorks();
             CompactDualChartDraws();
             Console.WriteLine(failures == 0 ? "PASS" : "FAILURES=" + failures);
             return failures == 0 ? 0 : 1;
+        }
+
+        private static void DashboardSizingKeepsFixedAspectRatio()
+        {
+            var current = new Rectangle(100, 100, 320, 347);
+            var minimum = new Size(256, 278);
+            var maximum = new Size(576, 625);
+
+            var horizontal = DashboardForm.ConstrainAspectRatio(
+                new Rectangle(100, 100, 480, 347), current, 2,
+                minimum, maximum);
+            Equal("horizontal-resize-width", 480, horizontal.Width);
+            Equal("horizontal-resize-fixed-height", 521,
+                horizontal.Height);
+
+            var vertical = DashboardForm.ConstrainAspectRatio(
+                new Rectangle(100, 100, 320, 500), current, 6,
+                minimum, maximum);
+            Equal("vertical-resize-height", 500, vertical.Height);
+            Equal("vertical-resize-fixed-width", 461, vertical.Width);
+
+            var clamped = DashboardForm.ConstrainAspectRatio(
+                new Rectangle(100, 100, 900, 900), current, 8,
+                minimum, maximum);
+            Equal("fixed-resize-max-width", 576, clamped.Width);
+            Equal("fixed-resize-max-height", 625, clamped.Height);
         }
 
         private static void HiddenCaptureBuildsBothSeries()
