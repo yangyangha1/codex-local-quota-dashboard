@@ -19,8 +19,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.3.7.0")]
-[assembly: AssemblyFileVersion("1.3.7.0")]
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
 
 namespace CodexLocalDashboard
 {
@@ -52,11 +52,7 @@ namespace CodexLocalDashboard
         private static readonly Version ApplicationVersion =
             Assembly.GetExecutingAssembly().GetName().Version;
         private static readonly string DisplayVersion = string.Format(
-            CultureInfo.InvariantCulture, "v{0}.{1}.{2}-demo",
-            ApplicationVersion.Major, ApplicationVersion.Minor,
-            ApplicationVersion.Build);
-        private static readonly string HeaderDisplayVersion = string.Format(
-            CultureInfo.InvariantCulture, "v{0}.{1}.{2}D",
+            CultureInfo.InvariantCulture, "v{0}.{1}.{2}",
             ApplicationVersion.Major, ApplicationVersion.Minor,
             ApplicationVersion.Build);
         private readonly UsageScanner scanner = new UsageScanner();
@@ -76,7 +72,7 @@ namespace CodexLocalDashboard
         private readonly Form taskbarOwner = new Form();
         private readonly Dictionary<Control, LayoutSpec> layout = new Dictionary<Control, LayoutSpec>();
         private readonly Label quotaTitle = Ui.Label("最近限额快照", 9, FontStyle.Bold, Color.FromArgb(142, 153, 169));
-        private readonly Label versionLabel = Ui.Label(HeaderDisplayVersion, 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
+        private readonly Label versionLabel = Ui.Label(DisplayVersion, 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
         private readonly Label quotaValue = Ui.Label("读取中…", 17, FontStyle.Bold, Color.White);
         private readonly Label quotaSub = Ui.Label("正在扫描本地日志", 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
         private readonly Label todayValue = Ui.Metric("—");
@@ -1347,9 +1343,8 @@ namespace CodexLocalDashboard
                                 canvas.Top + e.Y));
                         if (result == ProjectDetailClickResult.Close)
                             SetDetailMode(false);
+                        RenderLayeredSurface();
                     }
-                    else tokenRateChart.ToggleMode();
-                    RenderLayeredSurface();
                 }
                 return;
             }
