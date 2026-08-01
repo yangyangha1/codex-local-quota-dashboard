@@ -996,10 +996,9 @@ namespace CodexLocalDashboard
                 Color.FromArgb(75, 205, 143);
             var tokenColor = light ? Color.FromArgb(32, 117, 178) :
                 Color.FromArgb(92, 175, 232);
-            var rateBaseColor = light ? Color.FromArgb(103, 94, 176) :
-                Color.FromArgb(158, 149, 226);
+            var rateBaseColor = muted;
             var rateLineColor = Color.FromArgb(77, rateBaseColor);
-            var rateFillColor = Color.FromArgb(light ? 17 : 20,
+            var rateFillColor = Color.FromArgb(light ? 10 : 12,
                 rateBaseColor);
 
             var geometryScale = Math.Max(0.65f, bounds.Width / 292f);
