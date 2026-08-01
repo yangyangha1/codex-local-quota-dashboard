@@ -19,8 +19,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.3.5.0")]
-[assembly: AssemblyFileVersion("1.3.5.0")]
+[assembly: AssemblyVersion("1.3.7.0")]
+[assembly: AssemblyFileVersion("1.3.7.0")]
 
 namespace CodexLocalDashboard
 {
@@ -49,6 +49,16 @@ namespace CodexLocalDashboard
     {
         private const int DesignWidth = 320;
         private const int DesignHeight = 347;
+        private static readonly Version ApplicationVersion =
+            Assembly.GetExecutingAssembly().GetName().Version;
+        private static readonly string DisplayVersion = string.Format(
+            CultureInfo.InvariantCulture, "v{0}.{1}.{2}-demo",
+            ApplicationVersion.Major, ApplicationVersion.Minor,
+            ApplicationVersion.Build);
+        private static readonly string HeaderDisplayVersion = string.Format(
+            CultureInfo.InvariantCulture, "v{0}.{1}.{2}D",
+            ApplicationVersion.Major, ApplicationVersion.Minor,
+            ApplicationVersion.Build);
         private readonly UsageScanner scanner = new UsageScanner();
         private readonly TokenRateChart tokenRateChart = new TokenRateChart();
         private readonly ProjectDetailChart projectDetailChart =
@@ -66,6 +76,7 @@ namespace CodexLocalDashboard
         private readonly Form taskbarOwner = new Form();
         private readonly Dictionary<Control, LayoutSpec> layout = new Dictionary<Control, LayoutSpec>();
         private readonly Label quotaTitle = Ui.Label("最近限额快照", 9, FontStyle.Bold, Color.FromArgb(142, 153, 169));
+        private readonly Label versionLabel = Ui.Label(HeaderDisplayVersion, 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
         private readonly Label quotaValue = Ui.Label("读取中…", 17, FontStyle.Bold, Color.White);
         private readonly Label quotaSub = Ui.Label("正在扫描本地日志", 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
         private readonly Label todayValue = Ui.Metric("—");
@@ -147,7 +158,8 @@ namespace CodexLocalDashboard
             stripPanel.DpiScale = dpiScale;
             Controls.Add(stripPanel);
 
-            Add(quotaTitle, 14, 3, 226, 18);
+            Add(quotaTitle, 14, 3, 177, 18);
+            Add(versionLabel, 194, 3, 50, 18);
             Add(quotaValue, 12, 20, 296, 38);
             Add(quotaBar, 14, 60, 292, 6);
             Add(quotaSub, 14, 68, 292, 18);
@@ -308,7 +320,24 @@ namespace CodexLocalDashboard
         protected override void WndProc(ref Message m)
         {
             const int WM_NCHITTEST = 0x84;
+            const int WM_SIZING = 0x0214;
             const int WM_DPICHANGED = 0x02E0;
+            if (!stripMode && m.Msg == WM_SIZING)
+            {
+                var proposed = (RECT)Marshal.PtrToStructure(
+                    m.LParam, typeof(RECT));
+                var constrained = ConstrainAspectRatio(
+                    Rectangle.FromLTRB(proposed.Left, proposed.Top,
+                        proposed.Right, proposed.Bottom),
+                    Bounds, m.WParam.ToInt32(), MinimumSize, MaximumSize);
+                proposed.Left = constrained.Left;
+                proposed.Top = constrained.Top;
+                proposed.Right = constrained.Right;
+                proposed.Bottom = constrained.Bottom;
+                Marshal.StructureToPtr(proposed, m.LParam, false);
+                m.Result = (IntPtr)1;
+                return;
+            }
             if (m.Msg == WM_DPICHANGED)
             {
                 var newDpi = (int)(m.WParam.ToInt64() & 0xffff);
@@ -351,6 +380,99 @@ namespace CodexLocalDashboard
                 return;
             }
             base.WndProc(ref m);
+        }
+
+        internal static Rectangle ConstrainAspectRatio(Rectangle proposed,
+            Rectangle current, int sizingEdge, Size minimum, Size maximum)
+        {
+            const int WmszLeft = 1;
+            const int WmszRight = 2;
+            const int WmszTop = 3;
+            const int WmszTopLeft = 4;
+            const int WmszTopRight = 5;
+            const int WmszBottom = 6;
+            const int WmszBottomLeft = 7;
+            const int WmszBottomRight = 8;
+
+            var widthDriven = sizingEdge == WmszLeft ||
+                sizingEdge == WmszRight;
+            if (!widthDriven && sizingEdge != WmszTop &&
+                sizingEdge != WmszBottom)
+            {
+                var widthChange = Math.Abs(proposed.Width - current.Width) /
+                    (double)Math.Max(1, current.Width);
+                var heightChange = Math.Abs(proposed.Height - current.Height) /
+                    (double)Math.Max(1, current.Height);
+                widthDriven = widthChange >= heightChange;
+            }
+
+            var aspect = DesignWidth / (double)DesignHeight;
+            var targetWidth = widthDriven
+                ? proposed.Width
+                : (int)Math.Round(proposed.Height * aspect,
+                    MidpointRounding.AwayFromZero);
+            targetWidth = Math.Max(minimum.Width,
+                Math.Min(maximum.Width, targetWidth));
+            var targetHeight = (int)Math.Round(targetWidth / aspect,
+                MidpointRounding.AwayFromZero);
+            if (targetHeight < minimum.Height)
+            {
+                targetHeight = minimum.Height;
+                targetWidth = (int)Math.Round(targetHeight * aspect,
+                    MidpointRounding.AwayFromZero);
+            }
+            if (targetHeight > maximum.Height)
+            {
+                targetHeight = maximum.Height;
+                targetWidth = (int)Math.Round(targetHeight * aspect,
+                    MidpointRounding.AwayFromZero);
+            }
+
+            var left = proposed.Left;
+            var top = proposed.Top;
+            var right = proposed.Right;
+            var bottom = proposed.Bottom;
+            switch (sizingEdge)
+            {
+                case WmszLeft:
+                    left = right - targetWidth;
+                    top = current.Top + (current.Height - targetHeight) / 2;
+                    bottom = top + targetHeight;
+                    break;
+                case WmszRight:
+                    right = left + targetWidth;
+                    top = current.Top + (current.Height - targetHeight) / 2;
+                    bottom = top + targetHeight;
+                    break;
+                case WmszTop:
+                    top = bottom - targetHeight;
+                    left = current.Left + (current.Width - targetWidth) / 2;
+                    right = left + targetWidth;
+                    break;
+                case WmszBottom:
+                    bottom = top + targetHeight;
+                    left = current.Left + (current.Width - targetWidth) / 2;
+                    right = left + targetWidth;
+                    break;
+                case WmszTopLeft:
+                    left = right - targetWidth;
+                    top = bottom - targetHeight;
+                    break;
+                case WmszTopRight:
+                    right = left + targetWidth;
+                    top = bottom - targetHeight;
+                    break;
+                case WmszBottomLeft:
+                    left = right - targetWidth;
+                    bottom = top + targetHeight;
+                    break;
+                case WmszBottomRight:
+                default:
+                    right = left + targetWidth;
+                    bottom = top + targetHeight;
+                    break;
+            }
+            return Rectangle.FromLTRB(left, top, right, bottom);
         }
 
         private async void RefreshData()
@@ -438,7 +560,7 @@ namespace CodexLocalDashboard
 
         private void ConfigureTray()
         {
-            tray.Text = "Codex 本地用量";
+            tray.Text = "Codex 本地用量 " + DisplayVersion;
             trayIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             tray.Icon = trayIcon ?? SystemIcons.Application;
             tray.Visible = true;
@@ -860,8 +982,14 @@ namespace CodexLocalDashboard
             try
             {
                 var rowBytes = bitmap.Width * 4;
-                for (var y = 0; y < bitmap.Height; y++)
-                    CopyMemory(IntPtr.Add(bits, y * rowBytes), IntPtr.Add(data.Scan0, y * data.Stride), new UIntPtr((uint)rowBytes));
+                if (data.Stride == rowBytes)
+                    CopyMemory(bits, data.Scan0,
+                        new UIntPtr((uint)(rowBytes * bitmap.Height)));
+                else
+                    for (var y = 0; y < bitmap.Height; y++)
+                        CopyMemory(IntPtr.Add(bits, y * rowBytes),
+                            IntPtr.Add(data.Scan0, y * data.Stride),
+                            new UIntPtr((uint)rowBytes));
             }
             finally { bitmap.UnlockBits(data); }
             var previous = SelectObject(memoryDc, bitmapHandle);

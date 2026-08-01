@@ -65,6 +65,16 @@ namespace CodexLocalDashboard
             FormatFlags = StringFormatFlags.NoWrap
         };
         private List<ProjectUsage> projects = new List<ProjectUsage>();
+        private Dictionary<string, long> projectTotals =
+            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, List<SessionUsage>> sortedProjectSessions =
+            new Dictionary<string, List<SessionUsage>>(
+                StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, long> projectSessionMaximums =
+            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private long totalTokens;
+        private long maximumProjectTokens = 1;
+        private int totalSessionCount;
         private RectangleF closeBounds;
         private float scrollOffset;
         private float maximumScroll;
@@ -87,6 +97,16 @@ namespace CodexLocalDashboard
         public void Clear()
         {
             projects = new List<ProjectUsage>();
+            projectTotals = new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+            sortedProjectSessions =
+                new Dictionary<string, List<SessionUsage>>(
+                    StringComparer.OrdinalIgnoreCase);
+            projectSessionMaximums = new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+            totalTokens = 0;
+            maximumProjectTokens = 1;
+            totalSessionCount = 0;
             projectHitAreas = new List<ProjectHitArea>();
             sessionHitAreas = new List<SessionHitArea>();
             locationHitAreas = new List<LocationHitArea>();
@@ -111,6 +131,31 @@ namespace CodexLocalDashboard
             projects = value == null
                 ? new List<ProjectUsage>()
                 : value.OrderByDescending(item => item.TotalTokens).ToList();
+            projectTotals = new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+            sortedProjectSessions =
+                new Dictionary<string, List<SessionUsage>>(
+                    StringComparer.OrdinalIgnoreCase);
+            projectSessionMaximums = new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+            totalTokens = 0;
+            maximumProjectTokens = 1;
+            totalSessionCount = 0;
+            foreach (var project in projects)
+            {
+                var key = ProjectKey(project);
+                var projectTotal = project.TotalTokens;
+                var sessions = SortSessionsByActivity(project.Sessions);
+                projectTotals[key] = projectTotal;
+                sortedProjectSessions[key] = sessions;
+                projectSessionMaximums[key] = Math.Max(1L,
+                    sessions.Count == 0 ? 1L :
+                    sessions.Max(item => item.TotalTokens));
+                totalTokens += projectTotal;
+                maximumProjectTokens = Math.Max(maximumProjectTokens,
+                    projectTotal);
+                totalSessionCount += sessions.Count;
+            }
             var known = new HashSet<string>(
                 projects.Select(ProjectKey),
                 StringComparer.OrdinalIgnoreCase);
@@ -226,10 +271,6 @@ namespace CodexLocalDashboard
             var sessionFillEven = Color.FromArgb(light ? 42 : 48, blue);
             var sessionFillOdd = Color.FromArgb(light ? 32 : 38, blue);
             var alternateSession = Color.FromArgb(light ? 12 : 15, muted);
-            var total = projects.Sum(item => item.TotalTokens);
-            var maximum = Math.Max(1L,
-                projects.Count == 0 ? 1L :
-                projects.Max(item => item.TotalTokens));
             projectHitAreas.Clear();
             sessionHitAreas.Clear();
             locationHitAreas.Clear();
@@ -263,7 +304,8 @@ namespace CodexLocalDashboard
                 using (var gridPen = new Pen(grid,
                     Math.Max(0.55f, 0.65f * geometryScale)))
                 {
-                    DrawHeader(graphics, bounds, total, titleFont, smallFont,
+                    DrawHeader(graphics, bounds, totalTokens, titleFont,
+                        smallFont,
                         primaryBrush, mutedBrush, muted, gridPen,
                         geometryScale);
                     if (loading || loadError || projects.Count == 0)
@@ -287,8 +329,13 @@ namespace CodexLocalDashboard
                     for (var index = 0; index < projects.Count; index++)
                     {
                         var project = projects[index];
+                        var projectKey = ProjectKey(project);
+                        long projectTotal;
+                        if (!projectTotals.TryGetValue(projectKey,
+                            out projectTotal))
+                            projectTotal = project.TotalTokens;
                         var isExpanded = expandedProjects.Contains(
-                            ProjectKey(project));
+                            projectKey);
                         var projectBounds = new RectangleF(bounds.Left, y,
                             bounds.Width, projectHeight);
                         var visibleProjectBounds = RectangleF.Intersect(
@@ -302,7 +349,7 @@ namespace CodexLocalDashboard
                             graphics.FillRectangle(expandedBrush,
                                 projectBounds);
                         var folderBounds = DrawProject(graphics, project,
-                            index, maximum,
+                            projectTotal, index, maximumProjectTokens,
                             projectBounds, isExpanded, bodyFont, smallFont,
                             primaryBrush, mutedBrush, trackBrush, blueBrush,
                             blue, geometryScale);
@@ -314,11 +361,17 @@ namespace CodexLocalDashboard
                         y += projectHeight;
 
                         if (!isExpanded) continue;
-                        var sessions = SortSessionsByActivity(
-                            project.Sessions);
-                        var sessionMaximum = Math.Max(1L,
-                            sessions.Count == 0 ? 1L :
-                            sessions.Max(item => item.TotalTokens));
+                        List<SessionUsage> sessions;
+                        if (!sortedProjectSessions.TryGetValue(projectKey,
+                            out sessions))
+                            sessions = SortSessionsByActivity(
+                                project.Sessions);
+                        long sessionMaximum;
+                        if (!projectSessionMaximums.TryGetValue(projectKey,
+                            out sessionMaximum))
+                            sessionMaximum = Math.Max(1L,
+                                sessions.Count == 0 ? 1L :
+                                sessions.Max(item => item.TotalTokens));
                         for (var sessionIndex = 0;
                             sessionIndex < sessions.Count; sessionIndex++)
                         {
@@ -386,8 +439,7 @@ namespace CodexLocalDashboard
             graphics.DrawString("项目用量明细", titleFont, primaryBrush,
                 new PointF(bounds.Left, bounds.Top));
             var summary = FormatTokens(total) + " · " + projects.Count +
-                " 个项目 · " +
-                projects.Sum(item => item.Sessions.Count) + " 个会话";
+                " 个项目 · " + totalSessionCount + " 个会话";
             graphics.DrawString(summary, smallFont, mutedBrush,
                 new RectangleF(bounds.Left, bounds.Top + 15f * scale,
                     bounds.Width - 18f * scale, 14f * scale),
@@ -411,7 +463,7 @@ namespace CodexLocalDashboard
         }
 
         private static RectangleF DrawProject(Graphics graphics,
-            ProjectUsage project, int index, long maximum,
+            ProjectUsage project, long projectTotal, int index, long maximum,
             RectangleF bounds, bool expanded, Font bodyFont, Font smallFont,
             Brush primaryBrush, Brush mutedBrush, Brush trackBrush,
             Brush blueBrush, Color blue, float scale)
@@ -428,7 +480,7 @@ namespace CodexLocalDashboard
                 bodyFont, nameWidth), bodyFont, primaryBrush,
                 new RectangleF(nameLeft, bounds.Top + 1f * scale,
                     nameWidth, 14f * scale), NearFormat);
-            graphics.DrawString(FormatTokens(project.TotalTokens),
+            graphics.DrawString(FormatTokens(projectTotal),
                 bodyFont, primaryBrush,
                 new RectangleF(bounds.Right - valueWidth -
                     3f * scale, bounds.Top + 1f * scale,
@@ -441,7 +493,7 @@ namespace CodexLocalDashboard
             graphics.FillRectangle(trackBrush, barLeft, barTop,
                 barWidth, barHeight);
             graphics.FillRectangle(blueBrush, barLeft, barTop,
-                Math.Max(2f, (float)(barWidth * project.TotalTokens /
+                Math.Max(2f, (float)(barWidth * projectTotal /
                     (double)maximum)), barHeight);
             graphics.DrawString(project.Sessions.Count + " 个会话",
                 smallFont, mutedBrush,

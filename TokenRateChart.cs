@@ -996,6 +996,10 @@ namespace CodexLocalDashboard
                 Color.FromArgb(75, 205, 143);
             var tokenColor = light ? Color.FromArgb(32, 117, 178) :
                 Color.FromArgb(92, 175, 232);
+            var rateBaseColor = muted;
+            var rateLineColor = Color.FromArgb(128, rateBaseColor);
+            var rateFillColor = Color.FromArgb(light ? 10 : 12,
+                rateBaseColor);
 
             var geometryScale = Math.Max(0.65f, bounds.Width / 292f);
             var headerHeight = 18f * geometryScale;
@@ -1010,6 +1014,7 @@ namespace CodexLocalDashboard
                 Math.Max(5.5f, 7f * visualScale), FontStyle.Regular))
             using (var quotaBrush = new SolidBrush(quotaColor))
             using (var tokenBrush = new SolidBrush(tokenColor))
+            using (var rateBrush = new SolidBrush(rateBaseColor))
             using (var mutedBrush = new SolidBrush(muted))
             using (var center = Format(StringAlignment.Center,
                 StringAlignment.Center))
@@ -1024,33 +1029,62 @@ namespace CodexLocalDashboard
                             snapshot.QuotaConsumedDuringRuntime) + " · " +
                         ((int)snapshot.DisplayDuration.TotalHours)
                             .ToString(CultureInfo.InvariantCulture) + "h";
+                    var rateText = snapshot.CurrentTokenRate.HasValue
+                        ? "速率 " +
+                            FormatTokenCount(
+                                snapshot.CurrentTokenRate.Value) + "/分"
+                        : "速率 收集中";
                     var rightText = "累计 Token：" +
                         FormatTokenCount(snapshot.CumulativeIncrease);
-                    DrawHeaderPair(graphics, bounds, headerHeight, leftText,
-                        rightText, headerFont, quotaBrush, tokenBrush,
-                        geometryScale);
+                    DrawHeaderTriple(graphics, bounds, headerHeight,
+                        leftText, rateText, rightText, headerFont,
+                        quotaBrush, rateBrush, tokenBrush, geometryScale);
 
+                    var rateDrawn = DrawSeries(graphics, plot,
+                        snapshot.TokenPoints, snapshot.TokenAxisMaximum,
+                        snapshot.TimelineStart, snapshot.DisplayDuration,
+                        rateLineColor, geometryScale, true, false,
+                        rateFillColor);
                     primaryDrawn = DrawSeries(graphics, plot,
                         snapshot.QuotaPoints, 100d, snapshot.TimelineStart,
                         snapshot.DisplayDuration, quotaColor, geometryScale,
-                        true, false);
+                        true, false) || rateDrawn;
                     secondaryDrawn = DrawSeries(graphics, plot,
                         snapshot.CumulativePoints,
                         snapshot.CumulativeAxisMaximum,
                         snapshot.TimelineStart, snapshot.DisplayDuration,
                         tokenColor, geometryScale, true, false);
-                    if (snapshot.CumulativeIncrease > 0d)
+                    if (snapshot.PeakTokenRate > 0d ||
+                        snapshot.CumulativeIncrease > 0d)
                     {
+                        using (var nearTop = Format(StringAlignment.Near,
+                            StringAlignment.Near))
                         using (var farTop = Format(StringAlignment.Far,
                             StringAlignment.Near))
-                            graphics.DrawString("上限 " +
-                                FormatTokenCount(
-                                    snapshot.CumulativeAxisMaximum),
-                                smallFont, mutedBrush,
-                                new RectangleF(plot.Left, plot.Top +
-                                    geometryScale, plot.Width -
-                                    3f * geometryScale,
-                                    13f * geometryScale), farTop);
+                        {
+                            if (snapshot.PeakTokenRate > 0d)
+                                graphics.DrawString("峰值 " +
+                                    FormatTokenCount(
+                                        snapshot.PeakTokenRate) +
+                                    " · 速率上限 " +
+                                    FormatTokenCount(
+                                        snapshot.TokenAxisMaximum),
+                                    smallFont, mutedBrush,
+                                    new RectangleF(plot.Left +
+                                        3f * geometryScale,
+                                        plot.Top + geometryScale,
+                                        plot.Width * 0.64f,
+                                        13f * geometryScale), nearTop);
+                            if (snapshot.CumulativeIncrease > 0d)
+                                graphics.DrawString("累计上限 " +
+                                    FormatTokenCount(
+                                        snapshot.CumulativeAxisMaximum),
+                                    smallFont, mutedBrush,
+                                    new RectangleF(plot.Left, plot.Top +
+                                        geometryScale, plot.Width -
+                                        3f * geometryScale,
+                                        13f * geometryScale), farTop);
+                        }
                     }
                 }
                 else
@@ -1141,6 +1175,35 @@ namespace CodexLocalDashboard
             }
         }
 
+        private static void DrawHeaderTriple(Graphics graphics,
+            RectangleF bounds, float headerHeight, string leftText,
+            string centerText, string rightText, Font font, Brush leftBrush,
+            Brush centerBrush, Brush rightBrush, float geometryScale)
+        {
+            var gap = Math.Max(2f, 3f * geometryScale);
+            var usable = Math.Max(1f, bounds.Width - gap * 2f);
+            var leftWidth = usable * 0.38f;
+            var centerWidth = usable * 0.28f;
+            var rightWidth = usable - leftWidth - centerWidth;
+            using (var leftFormat = Format(StringAlignment.Near,
+                StringAlignment.Center))
+            using (var centerFormat = Format(StringAlignment.Center,
+                StringAlignment.Center))
+            using (var rightFormat = Format(StringAlignment.Far,
+                StringAlignment.Center))
+            {
+                graphics.DrawString(leftText, font, leftBrush,
+                    new RectangleF(bounds.Left, bounds.Top, leftWidth,
+                        headerHeight), leftFormat);
+                graphics.DrawString(centerText, font, centerBrush,
+                    new RectangleF(bounds.Left + leftWidth + gap,
+                        bounds.Top, centerWidth, headerHeight), centerFormat);
+                graphics.DrawString(rightText, font, rightBrush,
+                    new RectangleF(bounds.Right - rightWidth, bounds.Top,
+                        rightWidth, headerHeight), rightFormat);
+            }
+        }
+
         private static void DrawGrid(Graphics graphics, RectangleF plot,
             Color color, float geometryScale)
         {
@@ -1165,7 +1228,8 @@ namespace CodexLocalDashboard
             List<HistoryPoint> points, double axisMaximum,
             DateTimeOffset timelineStart, TimeSpan displayDuration,
             Color lineColor,
-            float geometryScale, bool smooth, bool dashed)
+            float geometryScale, bool smooth, bool dashed,
+            Color? fillColor = null)
         {
             if (axisMaximum <= 0d || points.Count < 2) return false;
             var seconds = Math.Max(1d, displayDuration.TotalSeconds);
@@ -1215,6 +1279,9 @@ namespace CodexLocalDashboard
                             using (var curve = BuildMonotoneCurve(reduced))
                             {
                                 if (curve.PointCount < 2) continue;
+                                if (fillColor.HasValue)
+                                    FillUnderSeries(graphics, curve,
+                                        reduced, plot, fillColor.Value);
                                 graphics.DrawPath(pen, curve);
                             }
                         }
@@ -1235,6 +1302,23 @@ namespace CodexLocalDashboard
                 graphics.Restore(state);
             }
             return drew;
+        }
+
+        private static void FillUnderSeries(Graphics graphics,
+            GraphicsPath curve, List<PlotPoint> points, RectangleF plot,
+            Color color)
+        {
+            if (curve == null || points == null || points.Count < 2) return;
+            using (var area = (GraphicsPath)curve.Clone())
+            using (var brush = new SolidBrush(color))
+            {
+                var first = points[0];
+                var last = points[points.Count - 1];
+                area.AddLine(last.X, last.Y, last.X, plot.Bottom);
+                area.AddLine(last.X, plot.Bottom, first.X, plot.Bottom);
+                area.CloseFigure();
+                graphics.FillPath(brush, area);
+            }
         }
 
         private static List<PlotPoint> ReduceByPixelColumn(
