@@ -131,6 +131,29 @@ namespace CodexLocalDashboard
                     Application.Run(form);
                     return 0;
                 }
+                if (Array.IndexOf(args, "--strip-2k") >= 0)
+                {
+                    const float previewDpiScale = 1.5f;
+                    using (var highDpiStrip = new Bitmap(1050, 42,
+                        PixelFormat.Format32bppPArgb))
+                    using (var highDpiPanel = new QuotaStripPanel
+                    {
+                        ClientSize = new Size(1050, 42),
+                        DpiScale = previewDpiScale,
+                        Theme = previewTheme,
+                        Snapshot = snapshot
+                    })
+                    using (var stripGraphics =
+                        Graphics.FromImage(highDpiStrip))
+                    {
+                        stripGraphics.Clear(previewTheme == ThemeMode.Light
+                            ? Color.FromArgb(230, 244, 244, 242)
+                            : Color.FromArgb(230, 20, 20, 20));
+                        highDpiPanel.DrawLayered(stripGraphics);
+                        highDpiStrip.Save(args[0], ImageFormat.Png);
+                    }
+                    return 0;
+                }
                 using (var dashboard = form.CreateLayeredSurfacePreview())
                 using (var strip = new Bitmap(700, 28, PixelFormat.Format32bppPArgb))
                 using (var stripPanel = new QuotaStripPanel { ClientSize = new Size(700, 28), DpiScale = 1f, Theme = previewTheme, Snapshot = snapshot })

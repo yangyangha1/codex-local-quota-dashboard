@@ -19,8 +19,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
+[assembly: AssemblyVersion("1.4.1.0")]
+[assembly: AssemblyFileVersion("1.4.1.0")]
 
 namespace CodexLocalDashboard
 {
@@ -89,6 +89,7 @@ namespace CodexLocalDashboard
         private bool stripMode;
         private bool dashboardTopMost = true;
         private Rectangle dashboardBounds;
+        private Rectangle sizingReferenceBounds = Rectangle.Empty;
         private IntPtr codexWindow;
         private IntPtr ownedCodexWindow;
         private UsageSnapshot latestSnapshot;
@@ -175,7 +176,7 @@ namespace CodexLocalDashboard
             };
             MouseWheel += HandleChartWheel;
             ConfigureTray();
-            renderThrottleTimer.Interval = 66;
+            renderThrottleTimer.Interval = 33;
             renderThrottleTimer.Tick += delegate
             {
                 renderThrottleTimer.Stop();
@@ -317,7 +318,21 @@ namespace CodexLocalDashboard
         {
             const int WM_NCHITTEST = 0x84;
             const int WM_SIZING = 0x0214;
+            const int WM_ENTERSIZEMOVE = 0x0231;
+            const int WM_EXITSIZEMOVE = 0x0232;
             const int WM_DPICHANGED = 0x02E0;
+            if (!stripMode && m.Msg == WM_ENTERSIZEMOVE)
+            {
+                sizingReferenceBounds = Bounds;
+                base.WndProc(ref m);
+                return;
+            }
+            if (m.Msg == WM_EXITSIZEMOVE)
+            {
+                sizingReferenceBounds = Rectangle.Empty;
+                base.WndProc(ref m);
+                return;
+            }
             if (!stripMode && m.Msg == WM_SIZING)
             {
                 var proposed = (RECT)Marshal.PtrToStructure(
@@ -325,7 +340,9 @@ namespace CodexLocalDashboard
                 var constrained = ConstrainAspectRatio(
                     Rectangle.FromLTRB(proposed.Left, proposed.Top,
                         proposed.Right, proposed.Bottom),
-                    Bounds, m.WParam.ToInt32(), MinimumSize, MaximumSize);
+                    sizingReferenceBounds.IsEmpty
+                        ? Bounds : sizingReferenceBounds,
+                    m.WParam.ToInt32(), MinimumSize, MaximumSize);
                 proposed.Left = constrained.Left;
                 proposed.Top = constrained.Top;
                 proposed.Right = constrained.Right;
@@ -361,7 +378,7 @@ namespace CodexLocalDashboard
                 {
                     var value = m.LParam.ToInt64();
                     var p = PointToClient(new Point((short)(value & 0xffff), (short)((value >> 16) & 0xffff)));
-                    var edge = (int)Math.Round(7 * dpiScale);
+                    var edge = (int)Math.Round(12 * dpiScale);
                     var left = p.X <= edge; var right = p.X >= ClientSize.Width - edge;
                     var top = p.Y <= edge; var bottom = p.Y >= ClientSize.Height - edge;
                     if (left && top) m.Result = (IntPtr)13;
@@ -1254,9 +1271,18 @@ namespace CodexLocalDashboard
             }
             if (ReferenceEquals(sender, canvas) && IsChartPoint(e.Location))
             {
-                chartClickPending = true;
-                dragging = false;
-                canvas.Capture = true;
+                if (detailMode)
+                {
+                    chartClickPending = true;
+                    dragging = false;
+                    canvas.Capture = true;
+                }
+                else
+                {
+                    chartClickPending = false;
+                    dragging = true;
+                    dragOrigin = Cursor.Position;
+                }
                 return;
             }
             detailClickPending = false;
@@ -1661,6 +1687,7 @@ namespace CodexLocalDashboard
     internal sealed class QuotaStripPanel : Panel
     {
         private const string StripFontFamily = "Microsoft YaHei UI";
+        private const float StripFontPixelsAt96Dpi = 13.333333f;
         private UsageSnapshot snapshot;
         private float dpiScale = 1f;
         private int preferredLogicalWidth = 280;
@@ -1678,7 +1705,7 @@ namespace CodexLocalDashboard
         {
             if (!preferredWidthDirty) return preferredLogicalWidth;
             var scale = Math.Max(1f, DpiScale);
-            using (var font = new Font(StripFontFamily, 10f, FontStyle.Regular))
+            using (var font = CreateStripFont(scale))
             {
                 var data = Snapshot;
                 var leftText = "等待本地限额快照";
@@ -1712,6 +1739,7 @@ namespace CodexLocalDashboard
         {
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+            graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
             graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
             if (!layered) graphics.Clear(BackColor);
@@ -1722,7 +1750,7 @@ namespace CodexLocalDashboard
             var data = Snapshot;
             if (data == null || data.Quotas.Count == 0)
             {
-                using (var font = new Font(StripFontFamily, 10f, FontStyle.Regular))
+                using (var font = CreateStripFont(scale))
                 using (var brush = new SolidBrush(menuTextColor))
                 using (var waitingFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
                     graphics.DrawString("等待本地限额快照", font, brush, new RectangleF(8 * scale, 0, ClientSize.Width - 16 * scale, ClientSize.Height), waitingFormat);
@@ -1735,7 +1763,7 @@ namespace CodexLocalDashboard
             var progressHeight = Math.Max(3f, 4 * scale);
             var progressY = (ClientSize.Height - progressHeight) / 2f;
 
-            using (var normal = new Font(StripFontFamily, 10f, FontStyle.Regular))
+            using (var normal = CreateStripFont(scale))
             using (var menuText = new SolidBrush(menuTextColor))
             using (var track = new SolidBrush(layered ? Color.FromArgb(170, trackColor) : trackColor))
             using (var accent = new SolidBrush(Ui.QuotaColor(remaining)))
@@ -1754,6 +1782,14 @@ namespace CodexLocalDashboard
                 graphics.FillRectangle(accent, progressX, progressY, (float)(progressWidth * remaining / 100d), progressHeight);
                 graphics.DrawString(reset, normal, menuText, new RectangleF(resetX, 0, resetTextWidth + 2 * scale, ClientSize.Height), centered);
             }
+        }
+
+        private static Font CreateStripFont(float dpiScale)
+        {
+            return new Font(StripFontFamily,
+                Math.Max(StripFontPixelsAt96Dpi,
+                    StripFontPixelsAt96Dpi * Math.Max(1f, dpiScale)),
+                FontStyle.Regular, GraphicsUnit.Pixel);
         }
 
         private static string ShortWindowName(int minutes)
