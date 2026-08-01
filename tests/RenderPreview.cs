@@ -65,7 +65,9 @@ namespace CodexLocalDashboard
                         startingTokens + minute * 138000L,
                         88d - minute * 25d / 119d, 10080, resetAt);
                 }
-                form.ApplyTheme(ThemeMode.Light);
+                var previewTheme = Array.IndexOf(args, "--dark") >= 0
+                    ? ThemeMode.Dark : ThemeMode.Light;
+                form.ApplyTheme(previewTheme);
                 form.ApplySnapshot(snapshot);
                 if (Array.IndexOf(args, "--rate") >= 0)
                     chart.ToggleMode();
@@ -131,7 +133,7 @@ namespace CodexLocalDashboard
                 }
                 using (var dashboard = form.CreateLayeredSurfacePreview())
                 using (var strip = new Bitmap(700, 28, PixelFormat.Format32bppPArgb))
-                using (var stripPanel = new QuotaStripPanel { ClientSize = new Size(700, 28), DpiScale = 1f, Theme = ThemeMode.Light, Snapshot = snapshot })
+                using (var stripPanel = new QuotaStripPanel { ClientSize = new Size(700, 28), DpiScale = 1f, Theme = previewTheme, Snapshot = snapshot })
                 using (var graphics = Graphics.FromImage(output))
                 {
                     if (Array.IndexOf(args, "--dashboard-only") >= 0)
