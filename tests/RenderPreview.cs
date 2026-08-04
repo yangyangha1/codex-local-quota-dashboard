@@ -110,8 +110,14 @@ namespace CodexLocalDashboard
                             18000 + index * 160L,
                             6200 + index * 45L,
                             5100 + index * 80L,
-                            900 + index * 12L));
+                            900 + index * 12L, index == 0,
+                            0, 0, 0, 0,
+                            88d - index * 25d / 179d,
+                            10080, resetAt,
+                            4840d + index * 41d));
                     history.SetSamples(historySamples, 184320);
+                    if (Array.IndexOf(args, "--history-loading") >= 0)
+                        history.SetLoading(true);
                 }
                 if (Array.IndexOf(args, "--dashboard-150") >= 0)
                 {

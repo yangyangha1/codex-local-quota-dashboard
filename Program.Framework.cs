@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.IO;
 using System.Linq;
@@ -117,7 +118,6 @@ namespace CodexLocalDashboard
         private bool historyMode;
         private CancellationTokenSource detailLoadCancellation;
         private CancellationTokenSource historyLoadCancellation;
-        private HistoryDatePickerPopup historyDatePicker;
         private ProjectDetailPointerHint lastDetailPointerHint;
         private HistoryPanelPointerHint lastHistoryPanelPointerHint;
         private bool lastHistoryButtonPointer;
@@ -144,6 +144,7 @@ namespace CodexLocalDashboard
             ShowInTaskbar = false;
             TopMost = true;
             DoubleBuffered = true;
+            KeyPreview = true;
             AutoScaleMode = AutoScaleMode.None;
             Font = new Font(Ui.FontFamilyName, 9f);
             taskbarOwner.ShowInTaskbar = false;
@@ -188,6 +189,8 @@ namespace CodexLocalDashboard
                 tips.SetToolTip(canvas, null);
             };
             MouseWheel += HandleChartWheel;
+            KeyPress += HandleHistoryDateKeyPress;
+            KeyDown += HandleHistoryDateKeyDown;
             ConfigureTray();
             renderThrottleTimer.Interval = 33;
             renderThrottleTimer.Tick += delegate
@@ -1221,10 +1224,6 @@ namespace CodexLocalDashboard
                     HistoryPanelPointerHint.None;
                 canvas.Cursor = Cursors.Default;
                 tips.SetToolTip(canvas, null);
-                if (historyDatePicker != null &&
-                    !historyDatePicker.IsDisposed)
-                    historyDatePicker.Close();
-                historyDatePicker = null;
             }
             foreach (Control control in canvas.Controls)
             {
@@ -1244,8 +1243,8 @@ namespace CodexLocalDashboard
             historyPanelChart.SetLoading(true);
             RenderLayeredSurface();
             var selectedDate = historyPanelChart.SelectedDate;
-            var from = new DateTimeOffset(selectedDate);
-            var to = from.AddDays(1);
+            var from = historyPanelChart.RequiredReadFrom;
+            var to = historyPanelChart.RequiredReadTo;
             try
             {
                 var samples = await Task.Run(() => historyStore.ReadRange(
@@ -1420,8 +1419,9 @@ namespace CodexLocalDashboard
                 case HistoryPanelClickResult.NextDay:
                     LoadHistoryDate(historyPanelChart.SelectedDate.AddDays(1));
                     break;
-                case HistoryPanelClickResult.PickDate:
-                    ShowHistoryDatePicker();
+                case HistoryPanelClickResult.EditDate:
+                    historyPanelChart.BeginDateEdit();
+                    Activate();
                     break;
                 case HistoryPanelClickResult.OpenStorage:
                     OpenHistoryStorage();
@@ -1438,50 +1438,59 @@ namespace CodexLocalDashboard
                     return "关闭历史数据";
                 case HistoryPanelPointerHint.PreviousDay:
                     return "前一天";
-                case HistoryPanelPointerHint.PickDate:
-                    return "选择日期";
+                case HistoryPanelPointerHint.EditDate:
+                    return "手动输入日期，按 Enter 确认";
                 case HistoryPanelPointerHint.NextDay:
                     return "后一天";
                 case HistoryPanelPointerHint.OpenStorage:
                     return "打开历史数据保存位置";
-                case HistoryPanelPointerHint.SelectSeries:
-                    return "切换历史数据类型";
                 case HistoryPanelPointerHint.SelectRange:
-                    return "左键框选范围，滚轮缩放时间轴";
+                    return "左键框选放大；滚轮切换 1–48 小时并取消框选";
                 default:
                     return null;
             }
         }
 
-        private void ShowHistoryDatePicker()
+        private void HandleHistoryDateKeyPress(object sender,
+            KeyPressEventArgs e)
         {
-            if (historyDatePicker != null &&
-                !historyDatePicker.IsDisposed)
+            if (!historyMode || !historyPanelChart.IsEditingDate) return;
+            if (e.KeyChar == '\r')
             {
-                historyDatePicker.Activate();
+                DateTime selected;
+                if (historyPanelChart.TryCommitDate(out selected))
+                    LoadHistoryDate(selected);
+                else RenderLayeredSurface();
+                e.Handled = true;
                 return;
             }
-            historyDatePicker = new HistoryDatePickerPopup(
-                historyPanelChart.SelectedDate, delegate(DateTime selected)
-                {
-                    if (historyMode) LoadHistoryDate(selected);
-                });
-            historyDatePicker.TopMost = TopMost;
-            historyDatePicker.FormClosed += delegate
+            if (historyPanelChart.HandleDateCharacter(e.KeyChar))
             {
-                historyDatePicker = null;
-            };
-            var desired = PointToScreen(new Point(
-                Math.Max(0, ClientSize.Width / 2 -
-                    historyDatePicker.Width / 2),
-                Math.Min(ClientSize.Height, (int)(150 * dpiScale))));
-            var area = Screen.FromPoint(desired).WorkingArea;
-            historyDatePicker.Location = new Point(
-                Math.Max(area.Left, Math.Min(area.Right -
-                    historyDatePicker.Width, desired.X)),
-                Math.Max(area.Top, Math.Min(area.Bottom -
-                    historyDatePicker.Height, desired.Y)));
-            historyDatePicker.Show(this);
+                RenderLayeredSurface();
+                e.Handled = true;
+            }
+        }
+
+        private void HandleHistoryDateKeyDown(object sender, KeyEventArgs e)
+        {
+            if (!historyMode || !historyPanelChart.IsEditingDate) return;
+            if (e.KeyCode == Keys.Escape)
+            {
+                historyPanelChart.CancelDateEdit();
+                RenderLayeredSurface();
+                e.SuppressKeyPress = true;
+                return;
+            }
+            if (e.Control && e.KeyCode == Keys.V)
+            {
+                try
+                {
+                    if (historyPanelChart.PasteDateText(Clipboard.GetText()))
+                        RenderLayeredSurface();
+                }
+                catch { }
+                e.SuppressKeyPress = true;
+            }
         }
 
         private void OpenHistoryStorage()
@@ -1511,8 +1520,15 @@ namespace CodexLocalDashboard
             {
                 var absolute = new PointF(canvas.Left + point.X,
                     canvas.Top + point.Y);
-                if (historyPanelChart.Zoom(e.Delta, absolute))
+                if (!historyPanelChart.ChartBounds.Contains(absolute)) return;
+                var previousHours = historyPanelChart.DisplayHours;
+                if (historyPanelChart.ZoomByWheel(e.Delta))
+                {
+                    if (previousHours != 48 &&
+                        historyPanelChart.DisplayHours == 48)
+                        BeginLoadHistory();
                     RenderLayeredSurface();
+                }
                 return;
             }
             if (detailMode)
@@ -1622,6 +1638,8 @@ namespace CodexLocalDashboard
                         canvas.Cursor = panelHint ==
                             HistoryPanelPointerHint.SelectRange
                             ? Cursors.Cross
+                            : panelHint == HistoryPanelPointerHint.EditDate
+                                ? Cursors.IBeam
                             : panelHint != HistoryPanelPointerHint.None ||
                                 hint != ProjectDetailPointerHint.None
                                 ? Cursors.Hand : Cursors.Default;
@@ -1759,8 +1777,6 @@ namespace CodexLocalDashboard
             projectDetailChart.Clear();
             historyPanelChart.Clear();
             scanner.Dispose();
-            if (historyDatePicker != null && !historyDatePicker.IsDisposed)
-                historyDatePicker.Close();
             historyStore.Dispose();
             countdownTimer.Stop();
             followTimer.Stop();
@@ -1985,6 +2001,35 @@ namespace CodexLocalDashboard
                 (int)Math.Round(from.R + (to.R - from.R) * amount),
                 (int)Math.Round(from.G + (to.G - from.G) * amount),
                 (int)Math.Round(from.B + (to.B - from.B) * amount));
+        }
+        public static void DrawEmbeddedClose(Graphics graphics,
+            RectangleF bounds, Color color, float scale)
+        {
+            using (var pen = new Pen(color, Math.Max(.8f, scale)))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                var x = bounds.Left + bounds.Width / 2f;
+                var y = bounds.Top + bounds.Height / 2f;
+                var radius = 4f * scale;
+                graphics.DrawLine(pen, x - radius, y - radius,
+                    x + radius, y + radius);
+                graphics.DrawLine(pen, x + radius, y - radius,
+                    x - radius, y + radius);
+            }
+        }
+        public static void DrawLocationAction(Graphics graphics,
+            RectangleF bounds, string text, Font font, Color color,
+            float scale, StringFormat format)
+        {
+            using (var pen = new Pen(Color.FromArgb(125, color),
+                Math.Max(.65f, .8f * scale)))
+            using (var brush = new SolidBrush(Color.FromArgb(205, color)))
+            {
+                graphics.DrawRectangle(pen, bounds.X, bounds.Y,
+                    bounds.Width, bounds.Height);
+                graphics.DrawString(text, font, brush, bounds, format);
+            }
         }
         public static string Compact(long value) { if (value >= 1000000000) return (value / 1000000000d).ToString("0.##") + "B"; if (value >= 1000000) return (value / 1000000d).ToString("0.##") + "M"; if (value >= 1000) return (value / 1000d).ToString("0.#") + "K"; return value.ToString("N0"); }
         public static string WindowName(int minutes)

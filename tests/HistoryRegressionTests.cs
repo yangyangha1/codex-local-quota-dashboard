@@ -20,6 +20,10 @@ namespace CodexLocalDashboard
                 PersistsCompleteIncrementEveryFiveMinutes();
                 Console.WriteLine("Running range test");
                 ReadsInclusiveDateRange();
+                Console.WriteLine("Running compatible quota extension test");
+                PersistsQuotaWithoutChangingRecordFormat();
+                Console.WriteLine("Running compatible file selection test");
+                ReusesCompatibleFileAndAvoidsIncompatibleFile();
                 Console.WriteLine("Running interrupted-tail test");
                 IgnoresIncompleteTail();
                 Console.WriteLine("Running privacy test");
@@ -30,6 +34,8 @@ namespace CodexLocalDashboard
                 CancellingHistoryReadDoesNotBlockWriter();
                 Console.WriteLine("Running chart interaction test");
                 ChartSupportsWheelAndBrushZoom();
+                Console.WriteLine("Running manual date input test");
+                AcceptsManualDateInput();
             }
             catch (Exception ex)
             {
@@ -67,6 +73,9 @@ namespace CodexLocalDashboard
                     "cached increment is retained independently");
                 Equal(2L, samples[1].DeltaReasoning,
                     "reasoning increment is retained independently");
+                True(samples[1].TokenRatePerMinute.HasValue &&
+                    Math.Abs(samples[1].TokenRatePerMinute.Value - 15d) < .01d,
+                    "five-minute token rate is stored in reserved bytes");
                 True(new FileInfo(path).Length == 16 +
                     HistoryStore.RecordSize * 2,
                     "history file uses fixed-size records");
@@ -89,6 +98,72 @@ namespace CodexLocalDashboard
                 True(selected[0].IsBaseline,
                     "new local day starts with a baseline record");
             });
+        }
+
+        private static void PersistsQuotaWithoutChangingRecordFormat()
+        {
+            WithStore(delegate(HistoryStore store, string path)
+            {
+                var at = new DateTimeOffset(2026, 8, 4, 10, 0, 0,
+                    TimeSpan.FromHours(8));
+                var reset = new DateTimeOffset(2026, 8, 10, 18, 0, 0,
+                    TimeSpan.FromHours(8));
+                store.Record(Snapshot(100, 20, 10, 2, 62.35d,
+                    10080, reset), at);
+                var sample = store.ReadAll().Single();
+                True(sample.RemainingPercent.HasValue,
+                    "quota is stored in compatible reserved bytes");
+                True(Math.Abs(sample.RemainingPercent.Value - 62.35d) < .01d,
+                    "remaining quota round-trips");
+                Equal(10080, sample.WindowMinutes,
+                    "quota window round-trips");
+                Equal(reset.ToUniversalTime(),
+                    sample.ResetsAt.Value.ToUniversalTime(),
+                    "quota reset time round-trips");
+                Equal(16L + HistoryStore.RecordSize,
+                    new FileInfo(path).Length,
+                    "quota extension keeps the v3 fixed record size");
+            });
+        }
+
+        private static void ReusesCompatibleFileAndAvoidsIncompatibleFile()
+        {
+            var compatibleFolder = Path.Combine(Path.GetTempPath(),
+                "CodexHistoryTests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(compatibleFolder);
+            try
+            {
+                var compatiblePath = Path.Combine(compatibleFolder,
+                    "usage-history-v3.bin");
+                using (var store = new HistoryStore(compatiblePath))
+                    store.Record(Snapshot(100, 20, 4, 1),
+                        DateTimeOffset.Now);
+                Equal(compatiblePath,
+                    HistoryStore.ResolveStoragePath(compatibleFolder),
+                    "compatible v3 file is reused for incremental appends");
+            }
+            finally
+            {
+                try { Directory.Delete(compatibleFolder, true); } catch { }
+            }
+
+            var incompatibleFolder = Path.Combine(Path.GetTempPath(),
+                "CodexHistoryTests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(incompatibleFolder);
+            try
+            {
+                var incompatiblePath = Path.Combine(incompatibleFolder,
+                    "usage-history-v3.bin");
+                File.WriteAllBytes(incompatiblePath, new byte[16]);
+                Equal(Path.Combine(incompatibleFolder,
+                        "usage-history-v4.bin"),
+                    HistoryStore.ResolveStoragePath(incompatibleFolder),
+                    "incompatible file is preserved and a new path is chosen");
+            }
+            finally
+            {
+                try { Directory.Delete(incompatibleFolder, true); } catch { }
+            }
         }
 
         private static void IgnoresIncompleteTail()
@@ -230,11 +305,6 @@ namespace CodexLocalDashboard
                 var center = new PointF(chart.PlotBounds.Left +
                     chart.PlotBounds.Width / 2f,
                     chart.PlotBounds.Top + chart.PlotBounds.Height / 2f);
-                chart.Zoom(120, center);
-                var afterWheel = chart.ViewDuration;
-                True(afterWheel < before,
-                    "mouse wheel zooms the history time axis");
-                chart.ResetZoom();
                 var start = new PointF(chart.PlotBounds.Left +
                     chart.PlotBounds.Width * .2f, center.Y);
                 var end = new PointF(chart.PlotBounds.Left +
@@ -244,15 +314,46 @@ namespace CodexLocalDashboard
                 chart.EndSelection(end);
                 True(chart.ViewDuration < before,
                     "left-button brush selection zooms to a local range");
+                chart.ZoomByWheel(120, 1000);
+                Equal(12, chart.DisplayHours,
+                    "history wheel reuses the realtime zoom levels");
+                Equal(TimeSpan.FromHours(12), chart.ViewDuration,
+                    "wheel clears the brushed range");
+                chart.ZoomByWheel(-120, 1300);
+                chart.ZoomByWheel(-120, 1600);
+                Equal(48, chart.DisplayHours,
+                    "history wheel reaches the realtime 48-hour level");
+                Equal(new DateTimeOffset(selectedDate).AddDays(-1),
+                    chart.RequiredReadFrom,
+                    "48-hour view requests the previous day automatically");
             }
         }
 
+        private static void AcceptsManualDateInput()
+        {
+            var chart = new HistoryPanelChart();
+            chart.SetDate(new DateTime(2026, 8, 4));
+            chart.BeginDateEdit();
+            foreach (var value in "20260801")
+                chart.HandleDateCharacter(value);
+            DateTime selected;
+            True(chart.TryCommitDate(out selected),
+                "manual yyyyMMdd date is accepted");
+            Equal(new DateTime(2026, 8, 1), selected,
+                "manual date resolves to the selected day");
+        }
+
         private static UsageSnapshot Snapshot(long input, long output,
-            long cached, long reasoning)
+            long cached, long reasoning, double? remaining = null,
+            int windowMinutes = 0, DateTimeOffset? resetsAt = null)
         {
             var today = new TokenTotals(input, output, cached, reasoning);
+            var quotas = new List<QuotaWindow>();
+            if (remaining.HasValue)
+                quotas.Add(new QuotaWindow(windowMinutes,
+                    100d - remaining.Value, resetsAt));
             return new UsageSnapshot(today, today, today, 0,
-                DateTimeOffset.Now, new List<QuotaWindow>());
+                DateTimeOffset.Now, quotas);
         }
 
         private static void WithStore(Action<HistoryStore, string> action)

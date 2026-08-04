@@ -70,6 +70,15 @@ namespace CodexLocalDashboard
         private bool hasWheelStepTick;
         private DateTimeOffset? lastCaptureAt;
         private DateTimeOffset? chartOriginAt;
+        private DateTimeOffset? customViewFrom;
+        private DateTimeOffset? customViewTo;
+        private RectangleF lastPlotBounds;
+        private DateTimeOffset lastTimelineStart;
+        private DateTimeOffset lastTimelineEnd;
+        private bool selecting;
+        private float selectionStartX;
+        private float selectionCurrentX;
+        private bool historicalSource;
 
         private double? lastTokenRate;
         private DateTimeOffset? lastRateCalculationAt;
@@ -121,6 +130,33 @@ namespace CodexLocalDashboard
             }
         }
 
+        internal TimeSpan ViewDuration
+        {
+            get
+            {
+                lock (gate)
+                    return customViewFrom.HasValue && customViewTo.HasValue
+                        ? customViewTo.Value - customViewFrom.Value
+                        : TimeSpan.FromHours(displayHoursValue);
+            }
+        }
+
+        internal RectangleF PlotBounds
+        {
+            get { lock (gate) return lastPlotBounds; }
+        }
+
+        internal void SetDisplayHours(int hours)
+        {
+            if (Array.IndexOf(ZoomLevels, (byte)hours) < 0)
+                throw new ArgumentOutOfRangeException("hours");
+            lock (gate)
+            {
+                displayHoursValue = (byte)hours;
+                ClearSelectionLocked();
+            }
+        }
+
         /// <summary>
         /// 滚轮向上缩短时间轴，向下扩大时间轴。
         /// 在 1h～48h 档位间切换，共享同一份纯内存历史。
@@ -135,6 +171,8 @@ namespace CodexLocalDashboard
             if (delta == 0) return false;
             lock (gate)
             {
+                var clearedSelection = customViewFrom.HasValue || selecting;
+                ClearSelectionLocked();
                 var direction = Math.Sign(delta);
                 if (wheelDirection != direction)
                 {
@@ -143,7 +181,7 @@ namespace CodexLocalDashboard
                 }
                 wheelDeltaAccumulator += delta;
                 if (Math.Abs(wheelDeltaAccumulator) < WheelStepDelta)
-                    return false;
+                    return clearedSelection;
 
                 if (hasWheelStepTick &&
                     unchecked(tickCount - lastWheelStepTick) <
@@ -151,7 +189,7 @@ namespace CodexLocalDashboard
                 {
                     wheelDeltaAccumulator = direction *
                         (WheelStepDelta - 1);
-                    return false;
+                    return clearedSelection;
                 }
 
                 var index = Array.IndexOf(ZoomLevels, displayHoursValue);
@@ -160,12 +198,143 @@ namespace CodexLocalDashboard
                     ? Math.Max(0, index - 1)
                     : Math.Min(ZoomLevels.Length - 1, index + 1);
                 wheelDeltaAccumulator = 0;
-                if (next == index) return false;
+                if (next == index) return clearedSelection;
                 displayHoursValue = ZoomLevels[next];
                 lastWheelStepTick = tickCount;
                 hasWheelStepTick = true;
                 return true;
             }
+        }
+
+        /// <summary>
+        /// 将磁盘中的五分钟增量转换成实时图表使用的同一组内部曲线。
+        /// 不改变历史文件格式，也不复制绘图或滚轮逻辑。
+        /// </summary>
+        internal void LoadHistoricalIncrements(
+            IList<HistorySample> samples)
+        {
+            lock (gate)
+            {
+                ResetAllLocked(null);
+                historicalSource = true;
+                if (samples == null || samples.Count == 0) return;
+                var ordered = new List<HistorySample>(samples);
+                ordered.Sort(delegate(HistorySample left, HistorySample right)
+                {
+                    return left.At.CompareTo(right.At);
+                });
+                long cumulative = 0L;
+                HistorySample previous = null;
+                for (var index = 0; index < ordered.Count; index++)
+                {
+                    var sample = ordered[index];
+                    if (previous != null && sample.At <= previous.At) continue;
+                    var increment = Math.Max(0L, sample.DeltaTokens);
+                    if (increment > long.MaxValue - cumulative)
+                        cumulative = long.MaxValue;
+                    else cumulative += increment;
+                    var gap = previous == null
+                        ? TimeSpan.Zero : sample.At - previous.At;
+                    var breakBefore = previous == null || sample.IsBaseline ||
+                        gap > TimeSpan.FromMinutes(10);
+                    counterHistory.Add(new TokenCounterSample(sample.At,
+                        cumulative, breakBefore));
+                    var minutes = previous == null
+                        ? 5d : Math.Max(1d, gap.TotalMinutes);
+                    var rate = sample.TokenRatePerMinute ??
+                        increment / minutes;
+                    tokenPoints.Add(new HistoryPoint(sample.At, rate,
+                        breakBefore));
+                    if (sample.RemainingPercent.HasValue)
+                    {
+                        var remaining = Math.Max(0d, Math.Min(100d,
+                            sample.RemainingPercent.Value));
+                        var quotaBreak = quotaSourcePoints.Count == 0 ||
+                            sample.WindowMinutes != quotaWindowMinutes ||
+                            !NullableDateEquals(sample.ResetsAt,
+                                quotaResetsAt) ||
+                            (hasQuotaSource && remaining >
+                                lastQuotaSource + QuotaResetRiseThreshold);
+                        AppendContinuousPointLocked(quotaPoints, sample.At,
+                            remaining);
+                        quotaSourcePoints.Add(new HistoryPoint(sample.At,
+                            remaining, quotaBreak));
+                        hasQuotaSource = true;
+                        lastQuotaSource = remaining;
+                        lastQuotaRemaining = remaining;
+                        quotaWindowMinutes = sample.WindowMinutes;
+                        quotaResetsAt = sample.ResetsAt;
+                    }
+                    previous = sample;
+                }
+                if (previous != null)
+                {
+                    chartOriginAt = ordered[0].At;
+                    lastCaptureAt = previous.At;
+                    lastTokenRate = tokenPoints.Count == 0
+                        ? (double?)null
+                        : tokenPoints[tokenPoints.Count - 1].Value;
+                }
+            }
+        }
+
+        internal bool BeginSelection(PointF point)
+        {
+            lock (gate)
+            {
+                if (!lastPlotBounds.Contains(point)) return false;
+                selecting = true;
+                selectionStartX = selectionCurrentX = point.X;
+                return true;
+            }
+        }
+
+        internal bool UpdateSelection(PointF point)
+        {
+            lock (gate)
+            {
+                if (!selecting) return false;
+                selectionCurrentX = Math.Max(lastPlotBounds.Left,
+                    Math.Min(lastPlotBounds.Right, point.X));
+                return true;
+            }
+        }
+
+        internal bool EndSelection(PointF point)
+        {
+            lock (gate)
+            {
+                if (!selecting) return false;
+                selectionCurrentX = Math.Max(lastPlotBounds.Left,
+                    Math.Min(lastPlotBounds.Right, point.X));
+                selecting = false;
+                var left = Math.Min(selectionStartX, selectionCurrentX);
+                var right = Math.Max(selectionStartX, selectionCurrentX);
+                if (right - left < Math.Max(6f,
+                    lastPlotBounds.Width * .025f)) return true;
+                var duration = lastTimelineEnd - lastTimelineStart;
+                var fromRatio = (left - lastPlotBounds.Left) /
+                    Math.Max(1d, lastPlotBounds.Width);
+                var toRatio = (right - lastPlotBounds.Left) /
+                    Math.Max(1d, lastPlotBounds.Width);
+                var from = lastTimelineStart.AddTicks(
+                    (long)(duration.Ticks * fromRatio));
+                var to = lastTimelineStart.AddTicks(
+                    (long)(duration.Ticks * toRatio));
+                if (to - from >= TimeSpan.FromMinutes(5))
+                {
+                    customViewFrom = from;
+                    customViewTo = to;
+                }
+                return true;
+            }
+        }
+
+        private void ClearSelectionLocked()
+        {
+            selecting = false;
+            customViewFrom = null;
+            customViewTo = null;
         }
 
         /// <summary>
@@ -255,6 +424,13 @@ namespace CodexLocalDashboard
         public void Draw(Graphics graphics, RectangleF bounds, ThemeMode theme,
             DateTimeOffset now, float visualScale)
         {
+            Draw(graphics, bounds, theme, now, visualScale, false);
+        }
+
+        internal void Draw(Graphics graphics, RectangleF bounds,
+            ThemeMode theme, DateTimeOffset now, float visualScale,
+            bool showTimeLabels)
+        {
             if (graphics == null || bounds.Width < 40f || bounds.Height < 50f)
                 return;
 
@@ -263,10 +439,19 @@ namespace CodexLocalDashboard
             {
                 PruneLocked(now);
                 snapshot = BuildRenderSnapshotLocked(now);
+                var geometryScale = Math.Max(0.65f, bounds.Width / 292f);
+                var headerHeight = 18f * geometryScale;
+                lastPlotBounds = RectangleF.FromLTRB(bounds.Left,
+                    bounds.Top + headerHeight + geometryScale,
+                    bounds.Right, bounds.Bottom);
+                lastTimelineStart = snapshot.TimelineStart;
+                lastTimelineEnd = snapshot.Now;
             }
 
             DrawSnapshot(graphics, bounds, theme, snapshot,
-                Math.Max(0.65f, Math.Min(2.5f, visualScale)));
+                Math.Max(0.65f, Math.Min(2.5f, visualScale)),
+                showTimeLabels);
+            DrawSelection(graphics, theme);
         }
 
         public void Draw(Graphics graphics, RectangleF bounds, ThemeMode theme,
@@ -499,6 +684,9 @@ namespace CodexLocalDashboard
             quotaSourcePoints.Clear();
             lastCaptureAt = captureAt;
             chartOriginAt = captureAt;
+            ClearSelectionLocked();
+            lastPlotBounds = RectangleF.Empty;
+            historicalSource = false;
 
             lastTokenRate = null;
             lastRateCalculationAt = null;
@@ -705,6 +893,8 @@ namespace CodexLocalDashboard
 
         private DateTimeOffset TimelineStartLocked(DateTimeOffset now)
         {
+            if (customViewFrom.HasValue && customViewTo.HasValue)
+                return customViewFrom.Value;
             var slidingStart = now -
                 TimeSpan.FromHours(displayHoursValue);
             if (!chartOriginAt.HasValue || chartOriginAt.Value < slidingStart)
@@ -716,12 +906,16 @@ namespace CodexLocalDashboard
         private RenderSnapshot BuildRenderSnapshotLocked(DateTimeOffset now)
         {
             var timelineStart = TimelineStartLocked(now);
-            var selectedTokens = SelectPoints(tokenPoints, timelineStart, now);
-            var selectedQuota = SelectPoints(quotaPoints, timelineStart, now);
+            var timelineEnd = customViewFrom.HasValue && customViewTo.HasValue
+                ? customViewTo.Value : now;
+            var selectedTokens = SelectPoints(tokenPoints, timelineStart,
+                timelineEnd);
+            var selectedQuota = SelectPoints(quotaPoints, timelineStart,
+                timelineEnd);
             var selectedQuotaSource = SelectPointsWithBaseline(
-                quotaSourcePoints, timelineStart, now);
-            var cumulativePoints = BuildCumulativePointsLocked(timelineStart,
-                now);
+                quotaSourcePoints, timelineStart, timelineEnd);
+            var cumulativePoints = BuildCumulativePointsLocked(
+                timelineStart, timelineEnd);
 
             double? currentQuota = hasQuotaSource
                 ? (double?)lastQuotaSource : null;
@@ -729,10 +923,12 @@ namespace CodexLocalDashboard
                 currentQuota = selectedQuota[selectedQuota.Count - 1].Value;
 
             var cumulativeIncrease = CalculatePeriodIncreaseLocked(
-                timelineStart, now);
+                timelineStart, timelineEnd);
             var cumulativeAxisMaximum = CalculateCumulativeAxis(
                 cumulativePoints);
-            var currentRate = lastTokenRate;
+            var currentRate = selectedTokens.Count > 0
+                ? (double?)selectedTokens[selectedTokens.Count - 1].Value
+                : historicalSource ? (double?)null : lastTokenRate;
             var peakRate = 0d;
             for (var i = 0; i < selectedTokens.Count; i++)
             {
@@ -741,6 +937,11 @@ namespace CodexLocalDashboard
             }
             var tokenAxisMaximum =
                 CalculateRoundedTokenAxisMaximum(peakRate);
+            var displayDuration = customViewFrom.HasValue &&
+                customViewTo.HasValue
+                ? timelineEnd - timelineStart
+                : TimeSpan.FromHours(displayHoursValue);
+            var axisEnd = timelineStart + displayDuration;
 
             return new RenderSnapshot((UsageChartMode)displayModeValue,
                 selectedTokens, selectedQuota, cumulativePoints,
@@ -748,8 +949,8 @@ namespace CodexLocalDashboard
                 cumulativeAxisMaximum, currentQuota, currentRate, peakRate,
                 cumulativeIncrease,
                 CalculateQuotaConsumption(selectedQuotaSource),
-                timelineStart, now,
-                TimeSpan.FromHours(displayHoursValue));
+                timelineStart, axisEnd,
+                displayDuration);
         }
 
         private List<HistoryPoint> BuildCumulativePointsLocked(
@@ -766,8 +967,12 @@ namespace CodexLocalDashboard
                 if (sample.At < from || sample.At > to) continue;
                 var value = Math.Max(0d, sample.CumulativeTokens -
                     baseline.Value.CumulativeTokens);
-                AppendPointLocked(output, sample.At, value,
-                    sample.BreakBefore);
+                if (historicalSource)
+                    output.Add(new HistoryPoint(sample.At, value,
+                        sample.BreakBefore));
+                else
+                    AppendPointLocked(output, sample.At, value,
+                        sample.BreakBefore);
             }
             return SmoothCumulativePoints(output);
         }
@@ -985,7 +1190,8 @@ namespace CodexLocalDashboard
         }
 
         private static void DrawSnapshot(Graphics graphics, RectangleF bounds,
-            ThemeMode theme, RenderSnapshot snapshot, float visualScale)
+            ThemeMode theme, RenderSnapshot snapshot, float visualScale,
+            bool showTimeLabels)
         {
             var light = theme == ThemeMode.Light;
             var muted = light ? Color.FromArgb(94, 105, 117) :
@@ -1028,10 +1234,10 @@ namespace CodexLocalDashboard
                 if (snapshot.Mode == UsageChartMode.CumulativeAndQuota)
                 {
                     var leftText = "消耗额度 " +
-                        FormatPercent(
-                            snapshot.QuotaConsumedDuringRuntime) + " · " +
-                        ((int)snapshot.DisplayDuration.TotalHours)
-                            .ToString(CultureInfo.InvariantCulture) + "h";
+                            FormatPercent(
+                                snapshot.QuotaConsumedDuringRuntime) + " · " +
+                            ((int)snapshot.DisplayDuration.TotalHours)
+                                .ToString(CultureInfo.InvariantCulture) + "h";
                     var rateText = snapshot.CurrentTokenRate.HasValue
                         ? "速率 " +
                             FormatTokenCount(
@@ -1049,9 +1255,10 @@ namespace CodexLocalDashboard
                         rateLineColor, geometryScale, true, false,
                         rateFillColor);
                     primaryDrawn = DrawSeries(graphics, plot,
-                        snapshot.QuotaPoints, 100d, snapshot.TimelineStart,
-                        snapshot.DisplayDuration, quotaColor, geometryScale,
-                        true, false) || rateDrawn;
+                        snapshot.QuotaPoints, 100d,
+                        snapshot.TimelineStart,
+                        snapshot.DisplayDuration, quotaColor,
+                        geometryScale, true, false) || rateDrawn;
                     secondaryDrawn = DrawSeries(graphics, plot,
                         snapshot.CumulativePoints,
                         snapshot.CumulativeAxisMaximum,
@@ -1138,6 +1345,63 @@ namespace CodexLocalDashboard
                 if (!primaryDrawn && !secondaryDrawn)
                     graphics.DrawString("等待连续数据", smallFont, mutedBrush,
                         plot, center);
+                if (showTimeLabels)
+                    DrawTimeLabels(graphics, plot, snapshot.TimelineStart,
+                        snapshot.Now, smallFont, mutedBrush, geometryScale);
+            }
+        }
+
+        private void DrawSelection(Graphics graphics, ThemeMode theme)
+        {
+            RectangleF plot;
+            float left;
+            float right;
+            lock (gate)
+            {
+                if (!selecting || lastPlotBounds.IsEmpty) return;
+                plot = lastPlotBounds;
+                left = Math.Min(selectionStartX, selectionCurrentX);
+                right = Math.Max(selectionStartX, selectionCurrentX);
+            }
+            var color = theme == ThemeMode.Light
+                ? Color.FromArgb(32, 117, 178)
+                : Color.FromArgb(92, 175, 232);
+            using (var brush = new SolidBrush(Color.FromArgb(
+                theme == ThemeMode.Light ? 42 : 55, color)))
+            using (var pen = new Pen(color, Math.Max(1f,
+                plot.Width / 292f)))
+            {
+                var selected = RectangleF.FromLTRB(left, plot.Top,
+                    right, plot.Bottom);
+                graphics.FillRectangle(brush, selected);
+                graphics.DrawRectangle(pen, selected.X, selected.Y,
+                    selected.Width, selected.Height);
+            }
+        }
+
+        private static void DrawTimeLabels(Graphics graphics,
+            RectangleF plot, DateTimeOffset from, DateTimeOffset to,
+            Font font, Brush brush, float scale)
+        {
+            if (to <= from) return;
+            var hours = (to - from).TotalHours;
+            for (var index = 0; index <= 6; index++)
+            {
+                var at = from.AddTicks((to - from).Ticks * index / 6)
+                    .ToLocalTime();
+                var text = hours > 24d
+                    ? at.ToString("MM-dd", CultureInfo.CurrentCulture)
+                    : at.ToString("HH:mm", CultureInfo.CurrentCulture);
+                var width = 44f * scale;
+                var x = plot.Left + plot.Width * index / 6f;
+                var bounds = new RectangleF(
+                    index == 0 ? x : index == 6 ? x - width : x - width / 2f,
+                    plot.Bottom - 14f * scale, width, 13f * scale);
+                using (var format = Format(
+                    index == 0 ? StringAlignment.Near :
+                    index == 6 ? StringAlignment.Far :
+                    StringAlignment.Center, StringAlignment.Far))
+                    graphics.DrawString(text, font, brush, bounds, format);
             }
         }
 
