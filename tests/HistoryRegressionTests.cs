@@ -301,6 +301,12 @@ namespace CodexLocalDashboard
             {
                 chart.Draw(graphics, new RectangleF(14, 14, 292, 239),
                     ThemeMode.Dark, 1f);
+                Equal(HistoryPanelClickResult.ConfirmRefresh,
+                    chart.HandleClick(new PointF(263f, 50f)),
+                    "extended date row exposes confirm and refresh action");
+                Equal(HistoryPanelClickResult.OpenStorage,
+                    chart.HandleClick(new PointF(246f, 24f)),
+                    "storage action is placed on the upper row");
                 var before = chart.ViewDuration;
                 var center = new PointF(chart.PlotBounds.Left +
                     chart.PlotBounds.Width / 2f,

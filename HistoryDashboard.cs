@@ -13,7 +13,8 @@ namespace CodexLocalDashboard
         PreviousDay = 2,
         EditDate = 3,
         NextDay = 4,
-        OpenStorage = 5
+        ConfirmRefresh = 5,
+        OpenStorage = 6
     }
 
     internal enum HistoryPanelPointerHint : byte
@@ -23,8 +24,9 @@ namespace CodexLocalDashboard
         PreviousDay = 2,
         EditDate = 3,
         NextDay = 4,
-        OpenStorage = 5,
-        SelectRange = 6
+        ConfirmRefresh = 5,
+        OpenStorage = 6,
+        SelectRange = 7
     }
 
     /// <summary>
@@ -39,6 +41,7 @@ namespace CodexLocalDashboard
         private RectangleF previousBounds;
         private RectangleF dateBounds;
         private RectangleF nextBounds;
+        private RectangleF confirmBounds;
         private RectangleF storageBounds;
         private RectangleF chartBounds;
         private bool loading;
@@ -130,6 +133,7 @@ namespace CodexLocalDashboard
             previousBounds = RectangleF.Empty;
             dateBounds = RectangleF.Empty;
             nextBounds = RectangleF.Empty;
+            confirmBounds = RectangleF.Empty;
             storageBounds = RectangleF.Empty;
             chartBounds = RectangleF.Empty;
             CancelDateEdit();
@@ -169,6 +173,8 @@ namespace CodexLocalDashboard
             if (dateBounds.Contains(point)) return HistoryPanelPointerHint.EditDate;
             if (nextBounds.Contains(point) && selectedDate < DateTime.Today)
                 return HistoryPanelPointerHint.NextDay;
+            if (confirmBounds.Contains(point))
+                return HistoryPanelPointerHint.ConfirmRefresh;
             if (storageBounds.Contains(point))
                 return HistoryPanelPointerHint.OpenStorage;
             if (chart.PlotBounds.Contains(point))
@@ -184,6 +190,8 @@ namespace CodexLocalDashboard
             if (dateBounds.Contains(point)) return HistoryPanelClickResult.EditDate;
             if (nextBounds.Contains(point) && selectedDate < DateTime.Today)
                 return HistoryPanelClickResult.NextDay;
+            if (confirmBounds.Contains(point))
+                return HistoryPanelClickResult.ConfirmRefresh;
             if (storageBounds.Contains(point))
                 return HistoryPanelClickResult.OpenStorage;
             return HistoryPanelClickResult.None;
@@ -277,11 +285,13 @@ namespace CodexLocalDashboard
             previousBounds = new RectangleF(bounds.Left,
                 bounds.Top + 25f * scale, 24f * scale, 22f * scale);
             dateBounds = new RectangleF(bounds.Left + 29f * scale,
-                bounds.Top + 25f * scale, 94f * scale, 22f * scale);
-            nextBounds = new RectangleF(bounds.Left + 128f * scale,
+                bounds.Top + 25f * scale, 144f * scale, 22f * scale);
+            nextBounds = new RectangleF(bounds.Left + 178f * scale,
                 bounds.Top + 25f * scale, 24f * scale, 22f * scale);
-            storageBounds = new RectangleF(bounds.Right - 64f * scale,
-                bounds.Top + 25f * scale, 64f * scale, 22f * scale);
+            confirmBounds = new RectangleF(bounds.Left + 207f * scale,
+                bounds.Top + 25f * scale, 85f * scale, 22f * scale);
+            storageBounds = new RectangleF(bounds.Right - 92f * scale,
+                bounds.Top, 64f * scale, 20f * scale);
             chartBounds = RectangleF.FromLTRB(bounds.Left,
                 bounds.Top + 56f * scale, bounds.Right, bounds.Bottom);
 
@@ -301,6 +311,9 @@ namespace CodexLocalDashboard
             {
                 graphics.DrawString("历史数据", titleFont, primaryBrush,
                     new PointF(bounds.Left, bounds.Top));
+                graphics.FillRectangle(surfaceBrush, storageBounds);
+                Ui.DrawLocationAction(graphics, storageBounds, "保存位置",
+                    smallFont, blue, scale, center);
                 Ui.DrawEmbeddedClose(graphics, closeBounds, muted, scale);
                 DrawBox(graphics, previousBounds, "‹", bodyFont,
                     primaryBrush, surfaceBrush, borderPen, center);
@@ -314,15 +327,13 @@ namespace CodexLocalDashboard
                         surfaceBrush, datePen, center);
                 if (invalidDate)
                     graphics.DrawString("日期无效", smallFont, errorBrush,
-                        new RectangleF(bounds.Left + 158f * scale,
-                            bounds.Top + 25f * scale,
-                            Math.Max(1f, storageBounds.Left - bounds.Left -
-                                163f * scale), 22f * scale), center);
+                        new RectangleF(bounds.Left + 67f * scale,
+                            bounds.Top, 82f * scale, 20f * scale), center);
                 DrawBox(graphics, nextBounds, "›", bodyFont,
                     selectedDate < DateTime.Today ? primaryBrush : mutedBrush,
                     surfaceBrush, borderPen, center);
-                graphics.FillRectangle(surfaceBrush, storageBounds);
-                Ui.DrawLocationAction(graphics, storageBounds, "保存位置",
+                graphics.FillRectangle(surfaceBrush, confirmBounds);
+                Ui.DrawLocationAction(graphics, confirmBounds, "确认 / 刷新",
                     smallFont, blue, scale, center);
 
                 chart.Draw(graphics, chartBounds, theme, ChartEnd(),

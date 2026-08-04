@@ -20,8 +20,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.4.1.0")]
-[assembly: AssemblyFileVersion("1.4.1.0")]
+[assembly: AssemblyVersion("1.5.0.0")]
+[assembly: AssemblyFileVersion("1.5.0.0")]
 
 namespace CodexLocalDashboard
 {
@@ -996,7 +996,7 @@ namespace CodexLocalDashboard
                     292f * chartScale,
                     183f * chartScale);
                 tokenRateChart.Draw(graphics, chartBounds, CurrentTheme,
-                    DateTimeOffset.Now, chartVisualScale);
+                    DateTimeOffset.Now, chartVisualScale, true);
             }
         }
 
@@ -1423,6 +1423,9 @@ namespace CodexLocalDashboard
                     historyPanelChart.BeginDateEdit();
                     Activate();
                     break;
+                case HistoryPanelClickResult.ConfirmRefresh:
+                    ConfirmOrRefreshHistory();
+                    break;
                 case HistoryPanelClickResult.OpenStorage:
                     OpenHistoryStorage();
                     break;
@@ -1442,6 +1445,8 @@ namespace CodexLocalDashboard
                     return "手动输入日期，按 Enter 确认";
                 case HistoryPanelPointerHint.NextDay:
                     return "后一天";
+                case HistoryPanelPointerHint.ConfirmRefresh:
+                    return "确认输入日期，或刷新当前日期历史";
                 case HistoryPanelPointerHint.OpenStorage:
                     return "打开历史数据保存位置";
                 case HistoryPanelPointerHint.SelectRange:
@@ -1457,10 +1462,7 @@ namespace CodexLocalDashboard
             if (!historyMode || !historyPanelChart.IsEditingDate) return;
             if (e.KeyChar == '\r')
             {
-                DateTime selected;
-                if (historyPanelChart.TryCommitDate(out selected))
-                    LoadHistoryDate(selected);
-                else RenderLayeredSurface();
+                ConfirmOrRefreshHistory();
                 e.Handled = true;
                 return;
             }
@@ -1469,6 +1471,20 @@ namespace CodexLocalDashboard
                 RenderLayeredSurface();
                 e.Handled = true;
             }
+        }
+
+        private void ConfirmOrRefreshHistory()
+        {
+            if (!historyMode) return;
+            if (!historyPanelChart.IsEditingDate)
+            {
+                BeginLoadHistory();
+                return;
+            }
+            DateTime selected;
+            if (historyPanelChart.TryCommitDate(out selected))
+                LoadHistoryDate(selected);
+            else RenderLayeredSurface();
         }
 
         private void HandleHistoryDateKeyDown(object sender, KeyEventArgs e)
