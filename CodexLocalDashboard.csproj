@@ -22,6 +22,8 @@
     <Compile Include="Program.Framework.cs" />
     <Compile Include="TokenRateChart.cs" />
     <Compile Include="ProjectDetail.cs" />
+    <Compile Include="HistoryStore.cs" />
+    <Compile Include="HistoryDashboard.cs" />
     <Reference Include="System.Web.Extensions" />
   </ItemGroup>
 </Project>

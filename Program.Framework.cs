@@ -56,6 +56,7 @@ namespace CodexLocalDashboard
             ApplicationVersion.Major, ApplicationVersion.Minor,
             ApplicationVersion.Build);
         private readonly UsageScanner scanner = new UsageScanner();
+        private readonly HistoryStore historyStore = new HistoryStore();
         private readonly TokenRateChart tokenRateChart = new TokenRateChart();
         private readonly ProjectDetailChart projectDetailChart =
             new ProjectDetailChart();
@@ -108,9 +109,12 @@ namespace CodexLocalDashboard
         private bool layeredRenderPending;
         private bool chartClickPending;
         private bool detailClickPending;
+        private bool historyClickPending;
         private bool detailMode;
+        private HistoryDashboardForm historyForm;
         private CancellationTokenSource detailLoadCancellation;
         private ProjectDetailPointerHint lastDetailPointerHint;
+        private bool lastHistoryPointer;
         private ThemeMode CurrentTheme { get { return (ThemeMode)themeModeValue; } }
         private static readonly uint OwnProcessId = unchecked((uint)Process.GetCurrentProcess().Id);
         private static int detailMemoryCleanupPending;
@@ -155,8 +159,8 @@ namespace CodexLocalDashboard
             stripPanel.DpiScale = dpiScale;
             Controls.Add(stripPanel);
 
-            Add(quotaTitle, 14, 3, 177, 18);
-            Add(versionLabel, 194, 3, 50, 18);
+            Add(quotaTitle, 14, 3, 132, 18);
+            Add(versionLabel, 149, 3, 42, 18);
             Add(quotaValue, 12, 20, 296, 38);
             Add(quotaBar, 14, 60, 292, 6);
             Add(quotaSub, 14, 68, 292, 18);
@@ -172,6 +176,7 @@ namespace CodexLocalDashboard
             {
                 canvas.Cursor = Cursors.Default;
                 lastDetailPointerHint = ProjectDetailPointerHint.None;
+                lastHistoryPointer = false;
                 tips.SetToolTip(canvas, null);
             };
             MouseWheel += HandleChartWheel;
@@ -495,8 +500,19 @@ namespace CodexLocalDashboard
             try
             {
                 var snapshot = await Task.Run(
-                    () => scanner.Scan(refreshCancellation.Token),
-                    refreshCancellation.Token);
+                    () =>
+                    {
+                        var value = scanner.Scan(refreshCancellation.Token);
+                        try
+                        {
+                            historyStore.Record(value, DateTimeOffset.Now);
+                        }
+                        catch
+                        {
+                            // History I/O must never degrade the live dashboard.
+                        }
+                        return value;
+                    }, refreshCancellation.Token);
                 if (refreshCancellation.IsCancellationRequested || IsDisposed) return;
                 ApplySnapshot(snapshot);
                 secondsRemaining = TokenRateChart.CaptureIntervalSeconds;
@@ -586,6 +602,8 @@ namespace CodexLocalDashboard
             switchModeItem = new ToolStripMenuItem("切换为 Codex 顶部横条");
             switchModeItem.Click += delegate { ToggleDisplayMode(); };
             menu.Items.Add(switchModeItem);
+            menu.Items.Add("History 历史数据…", null,
+                delegate { ShowHistory(); });
             darkThemeItem = new ToolStripMenuItem("深色");
             lightThemeItem = new ToolStripMenuItem("浅色");
             darkThemeItem.Click += delegate { ApplyTheme(ThemeMode.Dark); };
@@ -639,6 +657,8 @@ namespace CodexLocalDashboard
             quotaSub.ForeColor = muted;
             quotaValue.ForeColor = primary;
             quotaBar.TrackColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(55, 61, 73);
+            if (historyForm != null && !historyForm.IsDisposed)
+                historyForm.ApplyTheme(mode);
             stripPanel.Invalidate();
             if (darkThemeItem != null) darkThemeItem.Checked = mode == ThemeMode.Dark;
             if (lightThemeItem != null) lightThemeItem.Checked = mode == ThemeMode.Light;
@@ -893,13 +913,14 @@ namespace CodexLocalDashboard
             }
 
             var detailBounds = DetailButtonBounds();
+            var historyBounds = HistoryButtonBounds();
             var light = CurrentTheme == ThemeMode.Light;
             using (var border = new Pen(light
-                ? Color.FromArgb(76, 43, 126, 181)
-                : Color.FromArgb(92, 92, 175, 232)))
+                ? Color.FromArgb(88, 130, 162)
+                : Color.FromArgb(104, 162, 201)))
             using (var textBrush = new SolidBrush(light
-                ? Color.FromArgb(118, 64, 120, 155)
-                : Color.FromArgb(150, 174, 207, 226)))
+                ? Color.FromArgb(48, 91, 121)
+                : Color.FromArgb(176, 213, 235)))
             using (var font = new Font(Ui.FontFamilyName,
                 Math.Max(6f, 7.2f * lastScale), FontStyle.Bold))
             using (var format = new StringFormat
@@ -908,6 +929,11 @@ namespace CodexLocalDashboard
                 LineAlignment = StringAlignment.Center
             })
             {
+                graphics.DrawRectangle(border, historyBounds.X,
+                    historyBounds.Y, historyBounds.Width - 1,
+                    historyBounds.Height - 1);
+                graphics.DrawString("History", font, textBrush,
+                    historyBounds, format);
                 graphics.DrawRectangle(border, detailBounds.X,
                     detailBounds.Y, detailBounds.Width - 1,
                     detailBounds.Height - 1);
@@ -1240,6 +1266,42 @@ namespace CodexLocalDashboard
                 57f * scale, 18f * scale).Contains(point);
         }
 
+        private Rectangle HistoryButtonBounds()
+        {
+            var scale = canvas.Width / (float)DesignWidth;
+            return Rectangle.Round(new RectangleF(
+                canvas.Left + 194f * scale,
+                canvas.Top + 4f * scale,
+                50f * scale,
+                18f * scale));
+        }
+
+        private bool IsHistoryPoint(Point point)
+        {
+            if (stripMode || canvas.Width <= 0) return false;
+            var scale = canvas.Width / (float)DesignWidth;
+            return new RectangleF(194f * scale, 4f * scale,
+                50f * scale, 18f * scale).Contains(point);
+        }
+
+        private void ShowHistory()
+        {
+            if (historyForm == null || historyForm.IsDisposed)
+            {
+                historyForm = new HistoryDashboardForm(historyStore,
+                    CurrentTheme);
+                historyForm.FormClosed += delegate { historyForm = null; };
+                historyForm.Show();
+            }
+            else
+            {
+                if (historyForm.WindowState == FormWindowState.Minimized)
+                    historyForm.WindowState = FormWindowState.Normal;
+                historyForm.Show();
+                historyForm.Activate();
+            }
+        }
+
         private void HandleChartWheel(object sender, MouseEventArgs e)
         {
             if (stripMode) return;
@@ -1261,9 +1323,20 @@ namespace CodexLocalDashboard
         private void BeginDrag(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
+            if (ReferenceEquals(sender, canvas) &&
+                IsHistoryPoint(e.Location))
+            {
+                historyClickPending = true;
+                detailClickPending = false;
+                chartClickPending = false;
+                dragging = false;
+                canvas.Capture = true;
+                return;
+            }
             if (ReferenceEquals(sender, canvas) && IsDetailPoint(e.Location))
             {
                 detailClickPending = true;
+                historyClickPending = false;
                 chartClickPending = false;
                 dragging = false;
                 canvas.Capture = true;
@@ -1286,6 +1359,7 @@ namespace CodexLocalDashboard
                 return;
             }
             detailClickPending = false;
+            historyClickPending = false;
             chartClickPending = false;
             dragging = true;
             dragOrigin = Cursor.Position;
@@ -1300,19 +1374,25 @@ namespace CodexLocalDashboard
                 {
                     var local = canvas.PointToClient(
                         source.PointToScreen(e.Location));
-                    var hint = IsDetailPoint(local)
+                    var historyHint = IsHistoryPoint(local);
+                    var hint = historyHint
+                        ? ProjectDetailPointerHint.DetailButton
+                        : IsDetailPoint(local)
                         ? ProjectDetailPointerHint.DetailButton
                         : detailMode
                             ? projectDetailChart.PointerHint(
                                 new PointF(canvas.Left + local.X,
                                     canvas.Top + local.Y))
                             : ProjectDetailPointerHint.None;
-                    if (hint != lastDetailPointerHint)
+                    if (hint != lastDetailPointerHint ||
+                        historyHint != lastHistoryPointer)
                     {
                         lastDetailPointerHint = hint;
+                        lastHistoryPointer = historyHint;
                         canvas.Cursor = hint == ProjectDetailPointerHint.None
                             ? Cursors.Default : Cursors.Hand;
                         tips.SetToolTip(canvas,
+                            historyHint ? "查看历史数据" :
                             hint == ProjectDetailPointerHint.Close
                                 ? "关闭用量明细"
                                 : hint ==
@@ -1339,6 +1419,16 @@ namespace CodexLocalDashboard
 
         private void EndDrag(object sender, MouseEventArgs e)
         {
+            if (historyClickPending)
+            {
+                var showHistory = ReferenceEquals(sender, canvas) &&
+                    IsHistoryPoint(e.Location);
+                historyClickPending = false;
+                dragging = false;
+                canvas.Capture = false;
+                if (showHistory) ShowHistory();
+                return;
+            }
             if (detailClickPending)
             {
                 var showDetail = ReferenceEquals(sender, canvas) &&
@@ -1408,6 +1498,9 @@ namespace CodexLocalDashboard
             CancelDetailLoad();
             projectDetailChart.Clear();
             scanner.Dispose();
+            if (historyForm != null && !historyForm.IsDisposed)
+                historyForm.Close();
+            historyStore.Dispose();
             countdownTimer.Stop();
             followTimer.Stop();
             renderThrottleTimer.Stop();
