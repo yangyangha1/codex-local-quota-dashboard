@@ -92,6 +92,34 @@ namespace CodexLocalDashboard
                             BindingFlags.NonPublic).GetValue(form))
                         .SetProjects(snapshot.Projects);
                 }
+                if (Array.IndexOf(args, "--history") >= 0)
+                {
+                    typeof(DashboardForm).GetField("historyMode",
+                        BindingFlags.Instance | BindingFlags.NonPublic)
+                        .SetValue(form, true);
+                    var history = (HistoryPanelChart)typeof(DashboardForm)
+                        .GetField("historyPanelChart",
+                            BindingFlags.Instance | BindingFlags.NonPublic)
+                        .GetValue(form);
+                    history.SetDate(DateTime.Today);
+                    var historySamples = new List<HistorySample>();
+                    var historyStart = new DateTimeOffset(DateTime.Today);
+                    for (var index = 0; index < 180; index++)
+                        historySamples.Add(new HistorySample(
+                            historyStart.AddMinutes(index * 5),
+                            18000 + index * 160L,
+                            6200 + index * 45L,
+                            5100 + index * 80L,
+                            900 + index * 12L));
+                    history.SetSamples(historySamples, 184320);
+                }
+                if (Array.IndexOf(args, "--dashboard-150") >= 0)
+                {
+                    form.ClientSize = new Size(384, 417);
+                    typeof(DashboardForm).GetMethod("ScaleCanvas",
+                        BindingFlags.Instance | BindingFlags.NonPublic)
+                        .Invoke(form, null);
+                }
                 if (Array.IndexOf(args, "--detail-many") >= 0)
                 {
                     var detailChart = (ProjectDetailChart)

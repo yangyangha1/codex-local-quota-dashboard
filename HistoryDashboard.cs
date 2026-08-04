@@ -1,488 +1,218 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
-using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace CodexLocalDashboard
 {
-    internal sealed class HistoryDashboardForm : Form
+    internal enum HistorySeriesMode : byte
     {
-        private readonly HistoryStore store;
-        private readonly Label titleLabel = Ui.Label("历史数据", 13f,
-            FontStyle.Bold, Color.White);
-        private readonly LinkLabel openLocation = new LinkLabel
-        {
-            Text = "打开保存位置",
-            AutoSize = true,
-            TabStop = true
-        };
-        private readonly Label fromLabel = Ui.Label("开始日期", 8f,
-            FontStyle.Bold, Color.Gray);
-        private readonly Label toLabel = Ui.Label("结束日期", 8f,
-            FontStyle.Bold, Color.Gray);
-        private readonly DateTimePicker fromDate = new DateTimePicker();
-        private readonly DateTimePicker toDate = new DateTimePicker();
-        private readonly Button applyButton = new Button { Text = "查看" };
-        private readonly Button resetZoomButton = new Button
-            { Text = "重置缩放" };
-        private readonly Label quotaTitle = Ui.Label("最近限额快照", 9f,
-            FontStyle.Bold, Color.Gray);
-        private readonly Label quotaValue = Ui.Label("暂无历史", 17f,
-            FontStyle.Bold, Color.White);
-        private readonly Label quotaSub = Ui.Label("等待历史记录", 8f,
-            FontStyle.Bold, Color.Gray);
-        private readonly QuotaProgressBar quotaBar = new QuotaProgressBar();
-        private readonly Label todayCaption = Ui.Label("今日", 8f,
-            FontStyle.Bold, Color.Gray);
-        private readonly Label weekCaption = Ui.Label("近 7 天", 8f,
-            FontStyle.Bold, Color.Gray);
-        private readonly Label monthCaption = Ui.Label("近 30 天", 8f,
-            FontStyle.Bold, Color.Gray);
-        private readonly Label todayValue = Ui.Metric("—");
-        private readonly Label weekValue = Ui.Metric("—");
-        private readonly Label monthValue = Ui.Metric("—");
-        private readonly HistoryChartControl chart =
-            new HistoryChartControl();
-        private readonly Label statusLabel = Ui.Label("准备读取历史数据", 8f,
-            FontStyle.Regular, Color.Gray);
-        private ThemeMode currentTheme;
-        private bool loading;
-        private bool previewSamplesApplied;
-
-        public HistoryDashboardForm(HistoryStore historyStore,
-            ThemeMode theme)
-        {
-            store = historyStore;
-            currentTheme = theme;
-            Text = "Codex 历史数据";
-            StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(760, 560);
-            MinimumSize = new Size(660, 500);
-            ShowInTaskbar = true;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            Font = new Font(Ui.FontFamilyName, 9f);
-            DoubleBuffered = true;
-            KeyPreview = true;
-
-            fromDate.Format = DateTimePickerFormat.Custom;
-            toDate.Format = DateTimePickerFormat.Custom;
-            fromDate.CustomFormat = "yyyy年MM月dd日";
-            toDate.CustomFormat = "yyyy年MM月dd日";
-            fromDate.MaxDate = DateTime.Today;
-            toDate.MaxDate = DateTime.Today;
-            fromDate.Value = DateTime.Today.AddDays(-6);
-            toDate.Value = DateTime.Today;
-            fromDate.TabIndex = 0;
-            toDate.TabIndex = 1;
-            applyButton.TabIndex = 2;
-            resetZoomButton.TabIndex = 3;
-            openLocation.TabIndex = 4;
-            chart.TabIndex = 5;
-
-            ConfigureButton(applyButton, true);
-            ConfigureButton(resetZoomButton, false);
-            applyButton.Click += async delegate { await LoadSelectedRange(); };
-            resetZoomButton.Click += delegate { chart.ResetZoom(); };
-            openLocation.LinkClicked += delegate { OpenStorageLocation(); };
-
-            Controls.AddRange(new Control[]
-            {
-                titleLabel, openLocation, fromLabel, fromDate, toLabel,
-                toDate, applyButton, resetZoomButton, quotaTitle, quotaValue,
-                quotaBar, quotaSub, todayCaption, todayValue, weekCaption,
-                weekValue, monthCaption, monthValue, chart, statusLabel
-            });
-            Resize += delegate { LayoutControls(); };
-            Shown += async delegate
-            {
-                if (!previewSamplesApplied) await LoadSelectedRange();
-            };
-            KeyDown += delegate(object sender, KeyEventArgs e)
-            {
-                if (e.KeyCode == Keys.Escape)
-                {
-                    Close();
-                    e.Handled = true;
-                }
-                else if (e.Control && e.KeyCode == Keys.D0)
-                {
-                    chart.ResetZoom();
-                    e.Handled = true;
-                }
-            };
-            ApplyTheme(theme);
-            LayoutControls();
-        }
-
-        private static void ConfigureButton(Button button, bool primary)
-        {
-            button.FlatStyle = FlatStyle.Flat;
-            button.FlatAppearance.BorderSize = 1;
-            button.UseVisualStyleBackColor = false;
-            button.Cursor = Cursors.Hand;
-            button.Height = 30;
-            button.AccessibleName = button.Text;
-            if (primary) button.Font = new Font(Ui.FontFamilyName, 9f,
-                FontStyle.Bold);
-        }
-
-        private void LayoutControls()
-        {
-            var width = ClientSize.Width;
-            var bottom = ClientSize.Height;
-            titleLabel.Bounds = new Rectangle(18, 10, 250, 30);
-            openLocation.Location = new Point(
-                Math.Max(18, width - openLocation.PreferredWidth - 20), 18);
-            fromLabel.Bounds = new Rectangle(18, 48, 68, 20);
-            fromDate.Bounds = new Rectangle(18, 68, 154, 30);
-            toLabel.Bounds = new Rectangle(184, 48, 68, 20);
-            toDate.Bounds = new Rectangle(184, 68, 154, 30);
-            applyButton.Bounds = new Rectangle(350, 68, 72, 30);
-            resetZoomButton.Bounds = new Rectangle(432, 68, 92, 30);
-
-            quotaTitle.Bounds = new Rectangle(18, 108, width - 36, 20);
-            quotaValue.Bounds = new Rectangle(18, 128, width - 36, 34);
-            quotaBar.Bounds = new Rectangle(18, 164, width - 36, 6);
-            quotaSub.Bounds = new Rectangle(18, 172, width - 36, 20);
-
-            var metricWidth = Math.Max(120, (width - 52) / 3);
-            todayCaption.Bounds = new Rectangle(18, 199, metricWidth, 18);
-            todayValue.Bounds = new Rectangle(18, 217, metricWidth, 30);
-            weekCaption.Bounds = new Rectangle(26 + metricWidth, 199,
-                metricWidth, 18);
-            weekValue.Bounds = new Rectangle(26 + metricWidth, 217,
-                metricWidth, 30);
-            monthCaption.Bounds = new Rectangle(34 + metricWidth * 2, 199,
-                metricWidth, 18);
-            monthValue.Bounds = new Rectangle(34 + metricWidth * 2, 217,
-                metricWidth, 30);
-
-            chart.Bounds = new Rectangle(18, 253, width - 36,
-                Math.Max(180, bottom - 286));
-            statusLabel.Bounds = new Rectangle(18, bottom - 28,
-                width - 36, 20);
-        }
-
-        public void ApplyTheme(ThemeMode theme)
-        {
-            currentTheme = theme;
-            var light = theme == ThemeMode.Light;
-            var background = light ? Color.FromArgb(236, 245, 250) :
-                Color.FromArgb(26, 34, 37);
-            var primary = light ? Color.FromArgb(12, 19, 26) :
-                Color.FromArgb(242, 245, 249);
-            var muted = light ? Color.FromArgb(91, 101, 116) :
-                Color.FromArgb(160, 171, 186);
-            var border = light ? Color.FromArgb(183, 195, 207) :
-                Color.FromArgb(67, 78, 88);
-            BackColor = background;
-            ForeColor = primary;
-            foreach (var label in new[] { titleLabel, quotaValue,
-                todayValue, weekValue, monthValue })
-                label.ForeColor = primary;
-            foreach (var label in new[] { fromLabel, toLabel, quotaTitle,
-                quotaSub, todayCaption, weekCaption, monthCaption,
-                statusLabel })
-                label.ForeColor = muted;
-            openLocation.LinkColor = light ? Color.FromArgb(23, 104, 160) :
-                Color.FromArgb(117, 190, 235);
-            openLocation.ActiveLinkColor = light ?
-                Color.FromArgb(16, 82, 128) : Color.FromArgb(170, 218, 246);
-            openLocation.VisitedLinkColor = openLocation.LinkColor;
-            foreach (var picker in new[] { fromDate, toDate })
-            {
-                picker.CalendarForeColor = primary;
-                picker.CalendarMonthBackground = background;
-            }
-            applyButton.BackColor = light ? Color.FromArgb(32, 117, 178) :
-                Color.FromArgb(65, 142, 196);
-            applyButton.ForeColor = Color.White;
-            applyButton.FlatAppearance.BorderColor = applyButton.BackColor;
-            resetZoomButton.BackColor = background;
-            resetZoomButton.ForeColor = primary;
-            resetZoomButton.FlatAppearance.BorderColor = border;
-            quotaBar.TrackColor = light ? Color.FromArgb(211, 216, 224) :
-                Color.FromArgb(55, 61, 73);
-            chart.Theme = theme;
-            Invalidate(true);
-        }
-
-        private async Task LoadSelectedRange()
-        {
-            if (loading) return;
-            var from = fromDate.Value.Date;
-            var through = toDate.Value.Date;
-            if (from > through)
-            {
-                statusLabel.Text = "开始日期不能晚于结束日期。";
-                return;
-            }
-            loading = true;
-            applyButton.Enabled = false;
-            applyButton.Text = "读取中";
-            statusLabel.Text = "正在读取本地历史数据…";
-            try
-            {
-                var fromOffset = new DateTimeOffset(from);
-                var toExclusive = new DateTimeOffset(through.AddDays(1));
-                var samples = await Task.Run(() =>
-                    store.ReadRange(fromOffset, toExclusive));
-                if (IsDisposed) return;
-                ApplySamples(samples, fromOffset, toExclusive);
-            }
-            catch (Exception ex)
-            {
-                if (!IsDisposed)
-                {
-                    chart.SetError("历史数据读取失败");
-                    statusLabel.Text = "读取失败：" + ex.Message;
-                }
-            }
-            finally
-            {
-                loading = false;
-                if (!IsDisposed)
-                {
-                    applyButton.Enabled = true;
-                    applyButton.Text = "查看";
-                }
-            }
-        }
-
-        internal void ApplySamplesForPreview(List<HistorySample> samples,
-            DateTimeOffset from, DateTimeOffset toExclusive)
-        {
-            previewSamplesApplied = true;
-            ApplySamples(samples, from, toExclusive);
-        }
-
-        private void ApplySamples(List<HistorySample> samples,
-            DateTimeOffset from, DateTimeOffset toExclusive)
-        {
-            chart.SetSamples(samples, from, toExclusive);
-            if (samples.Count == 0)
-            {
-                quotaTitle.Text = "最近限额快照";
-                quotaValue.Text = "暂无历史";
-                quotaSub.Text = "打开软件并完成一次扫描后开始记录";
-                quotaBar.Value = 0;
-                todayValue.Text = weekValue.Text = monthValue.Text = "—";
-                statusLabel.Text = string.Format(CultureInfo.CurrentCulture,
-                    "{0:yyyy年M月d日}—{1:yyyy年M月d日} · 暂无记录 · {2}",
-                    from.LocalDateTime, toExclusive.AddDays(-1).LocalDateTime,
-                    FormatFileSize(store.FileSize));
-                return;
-            }
-            var latest = samples[samples.Count - 1];
-            todayValue.Text = Ui.Compact(latest.TodayTokens);
-            weekValue.Text = Ui.Compact(latest.WeekTokens);
-            monthValue.Text = Ui.Compact(latest.MonthTokens);
-            if (latest.RemainingPercent.HasValue)
-            {
-                var remaining = latest.RemainingPercent.Value;
-                quotaTitle.Text = Ui.WindowName(latest.WindowMinutes) +
-                    " · 历史快照";
-                quotaValue.Text = string.Format(CultureInfo.CurrentCulture,
-                    "剩余 {0:0.#}%", remaining);
-                quotaBar.Value = Math.Max(0, Math.Min(100,
-                    (int)Math.Round(remaining)));
-                quotaBar.FillColor = Ui.QuotaColor(remaining);
-                var reset = latest.ResetsAt.HasValue
-                    ? latest.ResetsAt.Value.ToLocalTime().ToString(
-                        "M月d日 HH:mm", CultureInfo.CurrentCulture)
-                    : "未知";
-                quotaSub.Text = string.Format(CultureInfo.CurrentCulture,
-                    "已用 {0:0.#}% · 重置 {1}", 100d - remaining, reset);
-            }
-            else
-            {
-                quotaTitle.Text = "最近限额快照";
-                quotaValue.Text = "暂无缓存";
-                quotaSub.Text = "该历史范围内没有额度记录";
-                quotaBar.Value = 0;
-            }
-            statusLabel.Text = string.Format(CultureInfo.CurrentCulture,
-                "{0:yyyy年M月d日}—{1:yyyy年M月d日} · {2:N0} 条记录 · {3}",
-                from.LocalDateTime, toExclusive.AddDays(-1).LocalDateTime,
-                samples.Count, FormatFileSize(store.FileSize));
-        }
-
-        private void OpenStorageLocation()
-        {
-            try
-            {
-                var folder = store.StorageDirectory;
-                if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
-                if (File.Exists(store.StoragePath))
-                {
-                    Process.Start(new ProcessStartInfo("explorer.exe",
-                        "/select,\"" + store.StoragePath + "\"")
-                    { UseShellExecute = true });
-                }
-                else
-                {
-                    Process.Start(new ProcessStartInfo("explorer.exe",
-                        "\"" + folder + "\"") { UseShellExecute = true });
-                }
-            }
-            catch (Exception ex)
-            {
-                statusLabel.Text = "无法打开保存位置：" + ex.Message;
-            }
-        }
-
-        private static string FormatFileSize(long bytes)
-        {
-            if (bytes < 1024) return bytes + " B";
-            if (bytes < 1024 * 1024)
-                return (bytes / 1024d).ToString("0.#",
-                    CultureInfo.CurrentCulture) + " KB";
-            return (bytes / (1024d * 1024d)).ToString("0.##",
-                CultureInfo.CurrentCulture) + " MB";
-        }
+        Total = 0,
+        Input = 1,
+        Output = 2,
+        Cached = 3,
+        Reasoning = 4
     }
 
-    internal sealed class HistoryChartControl : Control
+    internal enum HistoryPanelClickResult : byte
     {
-        private readonly ToolTip toolTip = new ToolTip();
+        None = 0,
+        Redraw = 1,
+        Close = 2,
+        PreviousDay = 3,
+        PickDate = 4,
+        NextDay = 5,
+        OpenStorage = 6
+    }
+
+    internal enum HistoryPanelPointerHint : byte
+    {
+        None = 0,
+        Close = 1,
+        PreviousDay = 2,
+        PickDate = 3,
+        NextDay = 4,
+        OpenStorage = 5,
+        SelectRange = 6,
+        SelectSeries = 7
+    }
+
+    /// <summary>
+    /// 与 ProjectDetailChart 相同的主界面内嵌视图：不创建历史窗口，
+    /// 只负责绘制当天历史和处理日期、框选及缩放交互。
+    /// </summary>
+    internal sealed class HistoryPanelChart
+    {
         private List<HistorySample> samples = new List<HistorySample>();
+        private DateTime selectedDate = DateTime.Today;
         private DateTimeOffset fullFrom;
         private DateTimeOffset fullTo;
         private DateTimeOffset viewFrom;
         private DateTimeOffset viewTo;
-        private Point selectionStart;
-        private Point selectionCurrent;
+        private RectangleF closeBounds;
+        private RectangleF previousBounds;
+        private RectangleF dateBounds;
+        private RectangleF nextBounds;
+        private RectangleF storageBounds;
+        private RectangleF[] seriesBounds = new RectangleF[5];
+        private RectangleF plotBounds;
         private bool selecting;
-        private string error;
-        private ThemeMode theme;
+        private float selectionStartX;
+        private float selectionCurrentX;
+        private bool loading;
+        private bool loadError;
+        private string storageStatus = "0 B";
+        private HistorySeriesMode seriesMode = HistorySeriesMode.Total;
 
-        public ThemeMode Theme
+        public DateTime SelectedDate { get { return selectedDate; } }
+        internal TimeSpan ViewDuration { get { return viewTo - viewFrom; } }
+        internal RectangleF PlotBounds { get { return plotBounds; } }
+
+        public void SetDate(DateTime value)
         {
-            get { return theme; }
-            set { theme = value; Invalidate(); }
+            selectedDate = value.Date > DateTime.Today
+                ? DateTime.Today : value.Date;
+            var localFrom = new DateTimeOffset(selectedDate);
+            fullFrom = localFrom.ToUniversalTime();
+            fullTo = localFrom.AddDays(1).ToUniversalTime();
+            viewFrom = fullFrom;
+            viewTo = fullTo;
+            samples = new List<HistorySample>();
+            selecting = false;
+            loadError = false;
         }
 
-        public HistoryChartControl()
+        public void SetLoading(bool value)
         {
-            SetStyle(ControlStyles.AllPaintingInWmPaint |
-                ControlStyles.OptimizedDoubleBuffer |
-                ControlStyles.ResizeRedraw | ControlStyles.UserPaint |
-                ControlStyles.Selectable |
-                ControlStyles.SupportsTransparentBackColor, true);
-            BackColor = Color.Transparent;
-            Cursor = Cursors.Cross;
-            AccessibleName = "历史用量图表";
-            AccessibleDescription =
-                "左键框选时间范围进行局部放大，滚轮围绕鼠标位置缩放时间轴。";
+            loading = value;
+            if (value) loadError = false;
         }
 
-        public void SetSamples(List<HistorySample> values,
-            DateTimeOffset from, DateTimeOffset toExclusive)
+        public void SetLoadError()
         {
+            loading = false;
+            loadError = true;
+        }
+
+        public void SetSamples(List<HistorySample> values, long fileSize)
+        {
+            loading = false;
+            loadError = false;
             samples = values == null ? new List<HistorySample>() :
                 values.OrderBy(value => value.At).ToList();
-            fullFrom = from;
-            fullTo = toExclusive;
-            error = null;
+            storageStatus = FormatFileSize(fileSize);
             ResetZoom();
         }
 
-        public void SetError(string message)
+        public void Clear()
         {
-            error = message;
-            samples.Clear();
-            Invalidate();
+            samples = new List<HistorySample>();
+            selecting = false;
+            loading = false;
+            loadError = false;
+            closeBounds = RectangleF.Empty;
+            previousBounds = RectangleF.Empty;
+            dateBounds = RectangleF.Empty;
+            nextBounds = RectangleF.Empty;
+            storageBounds = RectangleF.Empty;
+            seriesBounds = new RectangleF[5];
+            plotBounds = RectangleF.Empty;
         }
 
         public void ResetZoom()
         {
             viewFrom = fullFrom;
             viewTo = fullTo;
-            Invalidate();
-        }
-
-        protected override void OnMouseDown(MouseEventArgs e)
-        {
-            base.OnMouseDown(e);
-            if (e.Button != MouseButtons.Left || !PlotBounds.Contains(e.Location))
-                return;
-            Focus();
-            selecting = true;
-            selectionStart = selectionCurrent = e.Location;
-            Capture = true;
-            Invalidate();
-        }
-
-        protected override void OnMouseMove(MouseEventArgs e)
-        {
-            base.OnMouseMove(e);
-            if (selecting)
-            {
-                selectionCurrent = new Point(
-                    Math.Max(PlotBounds.Left,
-                        Math.Min(PlotBounds.Right, e.X)), e.Y);
-                Invalidate();
-                return;
-            }
-            if (!PlotBounds.Contains(e.Location) || samples.Count == 0)
-            {
-                toolTip.SetToolTip(this, null);
-                return;
-            }
-            var at = XToTime(e.X);
-            var nearest = samples.Where(value => value.At >= viewFrom &&
-                value.At <= viewTo).OrderBy(value =>
-                    Math.Abs((value.At - at).Ticks)).FirstOrDefault();
-            if (nearest == null) return;
-            var quota = nearest.RemainingPercent.HasValue
-                ? " · 剩余 " + nearest.RemainingPercent.Value.ToString(
-                    "0.#", CultureInfo.CurrentCulture) + "%" : string.Empty;
-            toolTip.SetToolTip(this,
-                nearest.At.ToLocalTime().ToString("yyyy年M月d日 HH:mm",
-                    CultureInfo.CurrentCulture) + "\n今日 " +
-                Ui.Compact(nearest.TodayTokens) + quota);
-        }
-
-        protected override void OnMouseUp(MouseEventArgs e)
-        {
-            base.OnMouseUp(e);
-            if (!selecting) return;
             selecting = false;
-            Capture = false;
-            var left = Math.Min(selectionStart.X, selectionCurrent.X);
-            var right = Math.Max(selectionStart.X, selectionCurrent.X);
-            if (right - left >= 8)
-            {
-                var newFrom = XToTime(left);
-                var newTo = XToTime(right);
-                if (newTo - newFrom >= TimeSpan.FromMinutes(5))
-                {
-                    viewFrom = newFrom;
-                    viewTo = newTo;
-                }
-            }
-            Invalidate();
         }
 
-        protected override void OnMouseWheel(MouseEventArgs e)
+        public HistoryPanelPointerHint PointerHint(PointF point)
         {
-            base.OnMouseWheel(e);
-            if (!PlotBounds.Contains(e.Location) || fullTo <= fullFrom) return;
+            if (closeBounds.Contains(point)) return HistoryPanelPointerHint.Close;
+            if (previousBounds.Contains(point))
+                return HistoryPanelPointerHint.PreviousDay;
+            if (dateBounds.Contains(point)) return HistoryPanelPointerHint.PickDate;
+            if (nextBounds.Contains(point) && selectedDate < DateTime.Today)
+                return HistoryPanelPointerHint.NextDay;
+            if (storageBounds.Contains(point))
+                return HistoryPanelPointerHint.OpenStorage;
+            for (var index = 0; index < seriesBounds.Length; index++)
+                if (seriesBounds[index].Contains(point))
+                    return HistoryPanelPointerHint.SelectSeries;
+            if (plotBounds.Contains(point))
+                return HistoryPanelPointerHint.SelectRange;
+            return HistoryPanelPointerHint.None;
+        }
+
+        public HistoryPanelClickResult HandleClick(PointF point)
+        {
+            if (closeBounds.Contains(point)) return HistoryPanelClickResult.Close;
+            if (previousBounds.Contains(point))
+                return HistoryPanelClickResult.PreviousDay;
+            if (dateBounds.Contains(point)) return HistoryPanelClickResult.PickDate;
+            if (nextBounds.Contains(point) && selectedDate < DateTime.Today)
+                return HistoryPanelClickResult.NextDay;
+            if (storageBounds.Contains(point))
+                return HistoryPanelClickResult.OpenStorage;
+            for (var index = 0; index < seriesBounds.Length; index++)
+            {
+                if (!seriesBounds[index].Contains(point)) continue;
+                seriesMode = (HistorySeriesMode)index;
+                ResetZoom();
+                return HistoryPanelClickResult.Redraw;
+            }
+            return HistoryPanelClickResult.None;
+        }
+
+        public bool BeginSelection(PointF point)
+        {
+            if (!plotBounds.Contains(point)) return false;
+            selecting = true;
+            selectionStartX = selectionCurrentX = point.X;
+            return true;
+        }
+
+        public bool UpdateSelection(PointF point)
+        {
+            if (!selecting) return false;
+            selectionCurrentX = Math.Max(plotBounds.Left,
+                Math.Min(plotBounds.Right, point.X));
+            return true;
+        }
+
+        public bool EndSelection(PointF point)
+        {
+            if (!selecting) return false;
+            selectionCurrentX = Math.Max(plotBounds.Left,
+                Math.Min(plotBounds.Right, point.X));
+            selecting = false;
+            var left = Math.Min(selectionStartX, selectionCurrentX);
+            var right = Math.Max(selectionStartX, selectionCurrentX);
+            if (right - left < Math.Max(6f, plotBounds.Width * .025f))
+                return true;
+            var newFrom = XToTime(left);
+            var newTo = XToTime(right);
+            if (newTo - newFrom < TimeSpan.FromMinutes(5)) return true;
+            viewFrom = newFrom;
+            viewTo = newTo;
+            return true;
+        }
+
+        public bool Zoom(int delta, PointF point)
+        {
+            if (delta == 0 || !plotBounds.Contains(point) || fullTo <= fullFrom)
+                return false;
             var current = viewTo - viewFrom;
-            var factor = e.Delta > 0 ? 0.80d : 1.25d;
-            var nextTicks = (long)(current.Ticks * factor);
-            var minimum = TimeSpan.FromMinutes(5).Ticks;
-            var maximum = (fullTo - fullFrom).Ticks;
-            nextTicks = Math.Max(minimum, Math.Min(maximum, nextTicks));
-            var anchor = XToTime(e.X);
-            var ratio = (e.X - PlotBounds.Left) /
-                (double)Math.Max(1, PlotBounds.Width);
+            var nextTicks = (long)(current.Ticks *
+                (delta > 0 ? .80d : 1.25d));
+            nextTicks = Math.Max(TimeSpan.FromMinutes(5).Ticks,
+                Math.Min((fullTo - fullFrom).Ticks, nextTicks));
+            var anchor = XToTime(point.X);
+            var ratio = (point.X - plotBounds.Left) /
+                Math.Max(1d, plotBounds.Width);
             var nextFrom = anchor.AddTicks(-(long)(nextTicks * ratio));
             var nextTo = nextFrom.AddTicks(nextTicks);
             if (nextFrom < fullFrom)
@@ -495,164 +225,160 @@ namespace CodexLocalDashboard
                 nextTo = fullTo;
                 nextFrom = nextTo.AddTicks(-nextTicks);
             }
+            if (nextFrom == viewFrom && nextTo == viewTo) return false;
             viewFrom = nextFrom;
             viewTo = nextTo;
-            Invalidate();
+            return true;
         }
 
-        protected override void OnKeyDown(KeyEventArgs e)
+        public void Draw(Graphics graphics, RectangleF bounds,
+            ThemeMode theme, float visualScale)
         {
-            base.OnKeyDown(e);
-            if (e.KeyCode == Keys.Home ||
-                (e.Control && e.KeyCode == Keys.D0))
-            {
-                ResetZoom();
-                e.Handled = true;
-            }
-            else if (e.KeyCode == Keys.Add || e.KeyCode == Keys.Oemplus)
-            {
-                ZoomFromKeyboard(0.8d);
-                e.Handled = true;
-            }
-            else if (e.KeyCode == Keys.Subtract || e.KeyCode == Keys.OemMinus)
-            {
-                ZoomFromKeyboard(1.25d);
-                e.Handled = true;
-            }
-        }
-
-        private void ZoomFromKeyboard(double factor)
-        {
-            if (fullTo <= fullFrom) return;
-            var middle = viewFrom.AddTicks((viewTo - viewFrom).Ticks / 2);
-            var ticks = Math.Max(TimeSpan.FromMinutes(5).Ticks,
-                Math.Min((fullTo - fullFrom).Ticks,
-                    (long)((viewTo - viewFrom).Ticks * factor)));
-            viewFrom = middle.AddTicks(-ticks / 2);
-            viewTo = viewFrom.AddTicks(ticks);
-            if (viewFrom < fullFrom)
-            {
-                viewFrom = fullFrom;
-                viewTo = viewFrom.AddTicks(ticks);
-            }
-            if (viewTo > fullTo)
-            {
-                viewTo = fullTo;
-                viewFrom = viewTo.AddTicks(-ticks);
-            }
-            Invalidate();
-        }
-
-        private Rectangle PlotBounds
-        {
-            get
-            {
-                return Rectangle.FromLTRB(48, 34,
-                    Math.Max(70, ClientSize.Width - 45),
-                    Math.Max(70, ClientSize.Height - 32));
-            }
-        }
-
-        private DateTimeOffset XToTime(int x)
-        {
-            var plot = PlotBounds;
-            var ratio = (x - plot.Left) /
-                (double)Math.Max(1, plot.Width);
-            ratio = Math.Max(0d, Math.Min(1d, ratio));
-            return viewFrom.AddTicks(
-                (long)((viewTo - viewFrom).Ticks * ratio));
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            e.Graphics.TextRenderingHint =
-                System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             var light = theme == ThemeMode.Light;
             var primary = light ? Color.FromArgb(12, 19, 26) :
                 Color.FromArgb(242, 245, 249);
             var muted = light ? Color.FromArgb(91, 101, 116) :
                 Color.FromArgb(160, 171, 186);
+            var border = light ? Color.FromArgb(153, 169, 184) :
+                Color.FromArgb(72, 88, 101);
+            var buttonFill = light ? Color.FromArgb(224, 236, 243) :
+                Color.FromArgb(37, 49, 54);
             var grid = light ? Color.FromArgb(55, 118, 130, 143) :
                 Color.FromArgb(52, 176, 188, 201);
             var tokenColor = light ? Color.FromArgb(32, 117, 178) :
                 Color.FromArgb(92, 175, 232);
-            var quotaColor = light ? Color.FromArgb(27, 151, 101) :
-                Color.FromArgb(75, 205, 143);
-            var plot = PlotBounds;
+            var scale = Math.Max(.65f, bounds.Width / 292f);
+            closeBounds = new RectangleF(bounds.Right - 18f * scale,
+                bounds.Top, 18f * scale, 18f * scale);
+            previousBounds = new RectangleF(bounds.Left,
+                bounds.Top + 24f * scale, 28f * scale, 24f * scale);
+            dateBounds = new RectangleF(bounds.Left + 34f * scale,
+                bounds.Top + 24f * scale, 116f * scale, 24f * scale);
+            nextBounds = new RectangleF(bounds.Left + 156f * scale,
+                bounds.Top + 24f * scale, 28f * scale, 24f * scale);
+            storageBounds = new RectangleF(bounds.Right - 102f * scale,
+                bounds.Top + 24f * scale, 102f * scale, 24f * scale);
+            var seriesTop = bounds.Top + 54f * scale;
+            var seriesGap = 4f * scale;
+            var seriesWidth = (bounds.Width - seriesGap * 4f) / 5f;
+            for (var index = 0; index < seriesBounds.Length; index++)
+                seriesBounds[index] = new RectangleF(bounds.Left +
+                    index * (seriesWidth + seriesGap), seriesTop,
+                    seriesWidth, 22f * scale);
+            plotBounds = RectangleF.FromLTRB(bounds.Left,
+                bounds.Top + 102f * scale, bounds.Right,
+                bounds.Bottom - 18f * scale);
+
+            using (var titleFont = new Font(Ui.FontFamilyName,
+                Math.Max(6.5f, 8.2f * visualScale), FontStyle.Bold))
+            using (var buttonFont = new Font(Ui.FontFamilyName,
+                Math.Max(6f, 7.4f * visualScale), FontStyle.Bold))
+            using (var smallFont = new Font(Ui.FontFamilyName,
+                Math.Max(5.6f, 7f * visualScale), FontStyle.Regular))
             using (var primaryBrush = new SolidBrush(primary))
             using (var mutedBrush = new SolidBrush(muted))
             using (var tokenBrush = new SolidBrush(tokenColor))
-            using (var quotaBrush = new SolidBrush(quotaColor))
-            using (var headerFont = new Font(Ui.FontFamilyName, 8f,
-                FontStyle.Bold))
-            using (var smallFont = new Font(Ui.FontFamilyName, 7.5f))
+            using (var borderPen = new Pen(border, Math.Max(1f, scale * .7f)))
+            using (var fillBrush = new SolidBrush(buttonFill))
+            using (var activeFillBrush = new SolidBrush(light
+                ? Color.FromArgb(197, 224, 239)
+                : Color.FromArgb(49, 77, 91)))
+            using (var center = CenterFormat())
             {
-                var visible = GetVisibleSamples();
-                var increase = CalculateIncrease(visible);
-                var quotaText = visible.Where(value =>
-                    value.RemainingPercent.HasValue).Select(value =>
-                        value.RemainingPercent.Value).DefaultIfEmpty().Min();
-                e.Graphics.DrawString("累计 Token：" + Ui.Compact(increase),
-                    headerFont, tokenBrush, new PointF(plot.Left, 6));
-                var spanText = FormatSpan(viewTo - viewFrom);
-                e.Graphics.DrawString("时间范围 " + spanText, headerFont,
-                    mutedBrush, new PointF(plot.Left + plot.Width * .38f, 6));
-                var right = quotaText > 0d ? "最低剩余 " +
-                    quotaText.ToString("0.#", CultureInfo.CurrentCulture) + "%"
-                    : "剩余额度 —";
-                using (var rightFormat = new StringFormat
-                {
-                    Alignment = StringAlignment.Far
-                })
-                    e.Graphics.DrawString(right, headerFont, quotaBrush,
-                        new RectangleF(plot.Left, 6, plot.Width, 20),
-                        rightFormat);
+                graphics.DrawString("历史数据", titleFont, primaryBrush,
+                    new RectangleF(bounds.Left, bounds.Top,
+                        bounds.Width - 22f * scale, 18f * scale));
+                graphics.DrawString("×", titleFont, mutedBrush,
+                    closeBounds, center);
+                DrawButton(graphics, previousBounds, "‹", buttonFont,
+                    primaryBrush, borderPen, fillBrush, center);
+                DrawButton(graphics, dateBounds,
+                    selectedDate.ToString("yyyy年M月d日",
+                        CultureInfo.CurrentCulture), buttonFont,
+                    primaryBrush, borderPen, fillBrush, center);
+                DrawButton(graphics, nextBounds, "›", buttonFont,
+                    selectedDate < DateTime.Today ? primaryBrush : mutedBrush,
+                    borderPen, fillBrush, center);
+                DrawButton(graphics, storageBounds,
+                    "保存位置 · " + storageStatus, buttonFont,
+                    primaryBrush, borderPen, fillBrush, center);
 
-                DrawGrid(e.Graphics, plot, grid);
-                if (!string.IsNullOrEmpty(error))
+                var seriesNames = new[]
+                    { "总量", "输入", "输出", "缓存", "推理" };
+                for (var index = 0; index < seriesBounds.Length; index++)
+                    DrawButton(graphics, seriesBounds[index],
+                        seriesNames[index], buttonFont,
+                        index == (int)seriesMode ? tokenBrush : primaryBrush,
+                        borderPen, index == (int)seriesMode
+                            ? activeFillBrush : fillBrush, center);
+
+                var visible = VisibleSamples();
+                var selectedTotal = visible.Aggregate(0L,
+                    (total, sample) => total + ValueForSeries(sample));
+                var tokenText = visible.Count == 0 ? "已记录：—" :
+                    "已记录：" + Ui.Compact(selectedTotal);
+                graphics.DrawString(tokenText, smallFont, tokenBrush,
+                    new RectangleF(bounds.Left, bounds.Top + 82f * scale,
+                        bounds.Width * .44f, 16f * scale));
+                using (var middle = CenterFormat())
+                    graphics.DrawString(FormatSpan(viewTo - viewFrom),
+                        smallFont, mutedBrush,
+                        new RectangleF(bounds.Left + bounds.Width * .38f,
+                            bounds.Top + 82f * scale,
+                            bounds.Width * .24f, 16f * scale), middle);
+                using (var far = FarCenterFormat())
+                    graphics.DrawString(visible.Count.ToString(
+                            "N0", CultureInfo.CurrentCulture) + " 条记录",
+                        smallFont, mutedBrush,
+                        new RectangleF(bounds.Left + bounds.Width * .62f,
+                            bounds.Top + 82f * scale,
+                            bounds.Width * .38f, 16f * scale), far);
+
+                DrawGrid(graphics, plotBounds, grid, scale);
+                if (loading)
                 {
-                    DrawCentered(e.Graphics, error, smallFont, mutedBrush, plot);
-                    return;
+                    DrawCentered(graphics, "正在读取当天历史…", smallFont,
+                        mutedBrush, plotBounds);
                 }
-                if (visible.Count < 2)
+                else if (loadError)
                 {
-                    DrawCentered(e.Graphics,
-                        visible.Count == 0 ? "该日期范围暂无历史数据" :
-                            "等待更多历史记录", smallFont, mutedBrush, plot);
-                    DrawTimeLabels(e.Graphics, plot, smallFont, mutedBrush);
-                    return;
+                    DrawCentered(graphics, "历史数据读取失败", smallFont,
+                        mutedBrush, plotBounds);
                 }
-
-                var points = Downsample(visible, 1000);
-                DrawTokenSeries(e.Graphics, plot, points, tokenColor);
-                DrawQuotaSeries(e.Graphics, plot, points, quotaColor);
-                DrawTimeLabels(e.Graphics, plot, smallFont, mutedBrush);
-                e.Graphics.DrawString("Token", smallFont, tokenBrush,
-                    new PointF(2, plot.Top + 2));
-                e.Graphics.DrawString("额度%", smallFont, quotaBrush,
-                    new PointF(plot.Right + 3, plot.Top + 2));
-
+                else if (visible.Count < 2)
+                {
+                    DrawCentered(graphics, visible.Count == 0
+                        ? "当天暂无历史数据" : "等待更多历史记录",
+                        smallFont, mutedBrush, plotBounds);
+                }
+                else
+                {
+                    var points = Downsample(visible, 700);
+                    DrawSeries(graphics, plotBounds, points, tokenColor,
+                        scale);
+                }
+                DrawTimeLabels(graphics, plotBounds, smallFont, mutedBrush,
+                    scale);
                 if (selecting)
                 {
-                    var left = Math.Min(selectionStart.X, selectionCurrent.X);
-                    var rightX = Math.Max(selectionStart.X,
-                        selectionCurrent.X);
+                    var left = Math.Min(selectionStartX, selectionCurrentX);
+                    var right = Math.Max(selectionStartX, selectionCurrentX);
                     using (var selectionBrush = new SolidBrush(
-                        Color.FromArgb(light ? 48 : 58, tokenColor)))
-                    using (var selectionPen = new Pen(tokenColor, 1f))
+                        Color.FromArgb(light ? 42 : 55, tokenColor)))
+                    using (var selectionPen = new Pen(tokenColor,
+                        Math.Max(1f, scale)))
                     {
-                        var selection = Rectangle.FromLTRB(left, plot.Top,
-                            rightX, plot.Bottom);
-                        e.Graphics.FillRectangle(selectionBrush, selection);
-                        e.Graphics.DrawRectangle(selectionPen, selection);
+                        var selected = RectangleF.FromLTRB(left,
+                            plotBounds.Top, right, plotBounds.Bottom);
+                        graphics.FillRectangle(selectionBrush, selected);
+                        graphics.DrawRectangle(selectionPen, selected.X,
+                            selected.Y, selected.Width, selected.Height);
                     }
                 }
             }
         }
 
-        private List<HistorySample> GetVisibleSamples()
+        private List<HistorySample> VisibleSamples()
         {
             return samples.Where(value => value.At >= viewFrom &&
                 value.At <= viewTo).ToList();
@@ -671,71 +397,27 @@ namespace CodexLocalDashboard
             return output;
         }
 
-        private static long CalculateIncrease(List<HistorySample> source)
-        {
-            if (source.Count < 2) return 0L;
-            long total = 0;
-            var previous = source[0].TodayTokens;
-            for (var index = 1; index < source.Count; index++)
-            {
-                var current = source[index].TodayTokens;
-                total += current >= previous ? current - previous : current;
-                previous = current;
-            }
-            return Math.Max(0L, total);
-        }
-
-        private void DrawTokenSeries(Graphics graphics, Rectangle plot,
-            List<HistorySample> points, Color color)
+        private void DrawSeries(Graphics graphics, RectangleF plot,
+            List<HistorySample> points, Color color, float scale)
         {
             var cumulative = new long[points.Count];
             long total = 0;
-            var previous = points[0].TodayTokens;
-            for (var index = 1; index < points.Count; index++)
+            for (var index = 0; index < points.Count; index++)
             {
-                var current = points[index].TodayTokens;
-                total += current >= previous ? current - previous : current;
+                total += Math.Max(0L, ValueForSeries(points[index]));
                 cumulative[index] = total;
-                previous = current;
             }
             var maximum = Math.Max(1L, cumulative.Max());
-            using (var pen = new Pen(color, 2f))
+            using (var pen = new Pen(color, Math.Max(1.2f, 1.8f * scale)))
             {
                 PointF? prior = null;
+                HistorySample priorSample = null;
                 for (var index = 0; index < points.Count; index++)
                 {
                     var point = points[index];
-                    var x = TimeToX(point.At, plot);
-                    var y = plot.Bottom - plot.Height *
-                        cumulative[index] / (float)maximum;
-                    var current = new PointF(x, y);
-                    if (prior.HasValue &&
-                        point.At - points[index - 1].At < MaxGap())
-                        graphics.DrawLine(pen, prior.Value, current);
-                    prior = current;
-                }
-            }
-        }
-
-        private void DrawQuotaSeries(Graphics graphics, Rectangle plot,
-            List<HistorySample> points, Color color)
-        {
-            using (var pen = new Pen(color, 1.7f))
-            {
-                pen.DashStyle = DashStyle.Dash;
-                PointF? prior = null;
-                HistorySample priorSample = null;
-                foreach (var point in points)
-                {
-                    if (!point.RemainingPercent.HasValue)
-                    {
-                        prior = null;
-                        priorSample = null;
-                        continue;
-                    }
-                    var current = new PointF(TimeToX(point.At, plot),
-                        plot.Bottom - plot.Height * (float)Math.Max(0d,
-                            Math.Min(100d, point.RemainingPercent.Value)) / 100f);
+                    var current = new PointF(TimeToX(point.At),
+                        plot.Bottom - plot.Height *
+                        cumulative[index] / (float)maximum);
                     if (prior.HasValue && priorSample != null &&
                         point.At - priorSample.At < MaxGap())
                         graphics.DrawLine(pen, prior.Value, current);
@@ -745,95 +427,170 @@ namespace CodexLocalDashboard
             }
         }
 
+        private long ValueForSeries(HistorySample sample)
+        {
+            switch (seriesMode)
+            {
+                case HistorySeriesMode.Input: return sample.DeltaInput;
+                case HistorySeriesMode.Output: return sample.DeltaOutput;
+                case HistorySeriesMode.Cached: return sample.DeltaCached;
+                case HistorySeriesMode.Reasoning:
+                    return sample.DeltaReasoning;
+                default: return sample.DeltaTokens;
+            }
+        }
+
         private TimeSpan MaxGap()
         {
-            var span = viewTo - viewFrom;
             return TimeSpan.FromTicks(Math.Max(TimeSpan.FromMinutes(3).Ticks,
-                span.Ticks / 120));
+                (viewTo - viewFrom).Ticks / 120));
         }
 
-        private float TimeToX(DateTimeOffset at, Rectangle plot)
+        private float TimeToX(DateTimeOffset at)
         {
-            var duration = Math.Max(1L, (viewTo - viewFrom).Ticks);
-            return plot.Left + plot.Width * (float)
-                ((at - viewFrom).Ticks / (double)duration);
+            return plotBounds.Left + plotBounds.Width * (float)
+                ((at - viewFrom).Ticks /
+                    (double)Math.Max(1L, (viewTo - viewFrom).Ticks));
         }
 
-        private void DrawTimeLabels(Graphics graphics, Rectangle plot,
-            Font font, Brush brush)
+        private DateTimeOffset XToTime(float x)
+        {
+            var ratio = (x - plotBounds.Left) /
+                Math.Max(1d, plotBounds.Width);
+            ratio = Math.Max(0d, Math.Min(1d, ratio));
+            return viewFrom.AddTicks((long)((viewTo - viewFrom).Ticks * ratio));
+        }
+
+        private void DrawTimeLabels(Graphics graphics, RectangleF plot,
+            Font font, Brush brush, float scale)
         {
             for (var index = 0; index <= 4; index++)
             {
                 var at = viewFrom.AddTicks((viewTo - viewFrom).Ticks *
-                    index / 4);
-                if (index == 4 && viewTo - viewFrom >= TimeSpan.FromDays(2))
-                    at = at.AddTicks(-1);
-                var local = at.ToLocalTime();
-                var text = viewTo - viewFrom >= TimeSpan.FromDays(2)
-                    ? local.ToString("M月d日", CultureInfo.CurrentCulture)
-                    : local.ToString("HH:mm", CultureInfo.CurrentCulture);
+                    index / 4).ToLocalTime();
+                var text = at.ToString("HH:mm", CultureInfo.CurrentCulture);
                 var x = plot.Left + plot.Width * index / 4f;
-                var labelBounds = index == 0
-                    ? new RectangleF(x, plot.Bottom + 4, 100, 18)
+                var width = 58f * scale;
+                var label = index == 0
+                    ? new RectangleF(x, plot.Bottom + 2f * scale,
+                        width, 15f * scale)
                     : index == 4
-                        ? new RectangleF(x - 100, plot.Bottom + 4, 100, 18)
-                        : new RectangleF(x - 50, plot.Bottom + 4, 100, 18);
+                        ? new RectangleF(x - width,
+                            plot.Bottom + 2f * scale, width, 15f * scale)
+                        : new RectangleF(x - width / 2f,
+                            plot.Bottom + 2f * scale, width, 15f * scale);
                 using (var format = new StringFormat
                 {
                     Alignment = index == 0 ? StringAlignment.Near :
                         index == 4 ? StringAlignment.Far :
-                            StringAlignment.Center
-                })
-                    graphics.DrawString(text, font, brush,
-                        labelBounds, format);
+                            StringAlignment.Center,
+                    LineAlignment = StringAlignment.Near
+                }) graphics.DrawString(text, font, brush, label, format);
             }
         }
 
-        private static void DrawGrid(Graphics graphics, Rectangle plot,
-            Color color)
+        private static void DrawGrid(Graphics graphics, RectangleF plot,
+            Color color, float scale)
         {
-            using (var pen = new Pen(color, 1f))
+            using (var pen = new Pen(color, Math.Max(.7f, scale * .7f)))
             {
                 pen.DashStyle = DashStyle.Dot;
-                for (var index = 0; index <= 5; index++)
-                {
-                    var y = plot.Top + plot.Height * index / 5f;
-                    graphics.DrawLine(pen, plot.Left, y, plot.Right, y);
-                }
                 for (var index = 0; index <= 4; index++)
                 {
+                    var y = plot.Top + plot.Height * index / 4f;
+                    graphics.DrawLine(pen, plot.Left, y, plot.Right, y);
                     var x = plot.Left + plot.Width * index / 4f;
                     graphics.DrawLine(pen, x, plot.Top, x, plot.Bottom);
                 }
             }
         }
 
-        private static void DrawCentered(Graphics graphics, string text,
-            Font font, Brush brush, Rectangle bounds)
+        private static void DrawButton(Graphics graphics, RectangleF bounds,
+            string text, Font font, Brush textBrush, Pen borderPen,
+            Brush fillBrush, StringFormat format)
         {
-            using (var format = new StringFormat
+            graphics.FillRectangle(fillBrush, bounds);
+            graphics.DrawRectangle(borderPen, bounds.X, bounds.Y,
+                bounds.Width, bounds.Height);
+            graphics.DrawString(text, font, textBrush, bounds, format);
+        }
+
+        private static void DrawCentered(Graphics graphics, string text,
+            Font font, Brush brush, RectangleF bounds)
+        {
+            using (var format = CenterFormat())
+                graphics.DrawString(text, font, brush, bounds, format);
+        }
+
+        private static StringFormat CenterFormat()
+        {
+            return new StringFormat
             {
                 Alignment = StringAlignment.Center,
-                LineAlignment = StringAlignment.Center
-            }) graphics.DrawString(text, font, brush, bounds, format);
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoWrap
+            };
+        }
+
+        private static StringFormat FarCenterFormat()
+        {
+            return new StringFormat
+            {
+                Alignment = StringAlignment.Far,
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoWrap
+            };
         }
 
         private static string FormatSpan(TimeSpan span)
         {
-            if (span.TotalDays >= 2)
-                return span.TotalDays.ToString("0.#",
-                    CultureInfo.CurrentCulture) + " 天";
-            if (span.TotalHours >= 1)
+            if (span.TotalHours >= 1d)
                 return span.TotalHours.ToString("0.#",
                     CultureInfo.CurrentCulture) + " 小时";
             return Math.Max(1d, span.TotalMinutes).ToString("0",
                 CultureInfo.CurrentCulture) + " 分钟";
         }
 
-        protected override void Dispose(bool disposing)
+        private static string FormatFileSize(long bytes)
         {
-            if (disposing) toolTip.Dispose();
-            base.Dispose(disposing);
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1024 * 1024)
+                return (bytes / 1024d).ToString("0.#",
+                    CultureInfo.CurrentCulture) + " KB";
+            return (bytes / (1024d * 1024d)).ToString("0.##",
+                CultureInfo.CurrentCulture) + " MB";
+        }
+    }
+
+    /// <summary>History 内嵌视图使用的单日选择弹层，不承载历史内容。</summary>
+    internal sealed class HistoryDatePickerPopup : Form
+    {
+        private readonly MonthCalendar calendar = new MonthCalendar();
+
+        public HistoryDatePickerPopup(DateTime selected,
+            Action<DateTime> onSelected)
+        {
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            MinimizeBox = false;
+            MaximizeBox = false;
+            Text = "选择日期";
+            calendar.MaxSelectionCount = 1;
+            calendar.MaxDate = DateTime.Today;
+            calendar.SetDate(selected.Date > DateTime.Today
+                ? DateTime.Today : selected.Date);
+            calendar.Dock = DockStyle.Fill;
+            Controls.Add(calendar);
+            ClientSize = calendar.Size;
+            calendar.DateSelected += delegate(object sender,
+                DateRangeEventArgs e)
+            {
+                onSelected(e.Start.Date);
+                Close();
+            };
+            Deactivate += delegate { Close(); };
         }
     }
 }

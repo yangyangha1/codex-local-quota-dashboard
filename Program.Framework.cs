@@ -60,6 +60,8 @@ namespace CodexLocalDashboard
         private readonly TokenRateChart tokenRateChart = new TokenRateChart();
         private readonly ProjectDetailChart projectDetailChart =
             new ProjectDetailChart();
+        private readonly HistoryPanelChart historyPanelChart =
+            new HistoryPanelChart();
         private readonly System.Windows.Forms.Timer countdownTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer followTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer renderThrottleTimer = new System.Windows.Forms.Timer();
@@ -110,11 +112,15 @@ namespace CodexLocalDashboard
         private bool chartClickPending;
         private bool detailClickPending;
         private bool historyClickPending;
+        private bool historySelectionPending;
         private bool detailMode;
-        private HistoryDashboardForm historyForm;
+        private bool historyMode;
         private CancellationTokenSource detailLoadCancellation;
+        private CancellationTokenSource historyLoadCancellation;
+        private HistoryDatePickerPopup historyDatePicker;
         private ProjectDetailPointerHint lastDetailPointerHint;
-        private bool lastHistoryPointer;
+        private HistoryPanelPointerHint lastHistoryPanelPointerHint;
+        private bool lastHistoryButtonPointer;
         private ThemeMode CurrentTheme { get { return (ThemeMode)themeModeValue; } }
         private static readonly uint OwnProcessId = unchecked((uint)Process.GetCurrentProcess().Id);
         private static int detailMemoryCleanupPending;
@@ -176,7 +182,9 @@ namespace CodexLocalDashboard
             {
                 canvas.Cursor = Cursors.Default;
                 lastDetailPointerHint = ProjectDetailPointerHint.None;
-                lastHistoryPointer = false;
+                lastHistoryButtonPointer = false;
+                lastHistoryPanelPointerHint =
+                    HistoryPanelPointerHint.None;
                 tips.SetToolTip(canvas, null);
             };
             MouseWheel += HandleChartWheel;
@@ -603,7 +611,11 @@ namespace CodexLocalDashboard
             switchModeItem.Click += delegate { ToggleDisplayMode(); };
             menu.Items.Add(switchModeItem);
             menu.Items.Add("History 历史数据…", null,
-                delegate { ShowHistory(); });
+                delegate
+                {
+                    SetHistoryMode(!historyMode);
+                    RenderLayeredSurface();
+                });
             darkThemeItem = new ToolStripMenuItem("深色");
             lightThemeItem = new ToolStripMenuItem("浅色");
             darkThemeItem.Click += delegate { ApplyTheme(ThemeMode.Dark); };
@@ -657,8 +669,6 @@ namespace CodexLocalDashboard
             quotaSub.ForeColor = muted;
             quotaValue.ForeColor = primary;
             quotaBar.TrackColor = light ? Color.FromArgb(211, 216, 224) : Color.FromArgb(55, 61, 73);
-            if (historyForm != null && !historyForm.IsDisposed)
-                historyForm.ApplyTheme(mode);
             stripPanel.Invalidate();
             if (darkThemeItem != null) darkThemeItem.Checked = mode == ThemeMode.Dark;
             if (lightThemeItem != null) lightThemeItem.Checked = mode == ThemeMode.Light;
@@ -886,7 +896,8 @@ namespace CodexLocalDashboard
             foreach (Control control in canvas.Controls)
             {
                 LayoutSpec original;
-                if (detailMode && layout.TryGetValue(control, out original) &&
+                if ((detailMode || historyMode) &&
+                    layout.TryGetValue(control, out original) &&
                     original.Bounds.Top >= 102)
                     continue;
                 var bounds = new Rectangle(canvas.Left + control.Left, canvas.Top + control.Top, control.Width, control.Height);
@@ -921,6 +932,9 @@ namespace CodexLocalDashboard
             using (var textBrush = new SolidBrush(light
                 ? Color.FromArgb(48, 91, 121)
                 : Color.FromArgb(176, 213, 235)))
+            using (var activeBrush = new SolidBrush(light
+                ? Color.FromArgb(205, 228, 240)
+                : Color.FromArgb(48, 72, 84)))
             using (var font = new Font(Ui.FontFamilyName,
                 Math.Max(6f, 7.2f * lastScale), FontStyle.Bold))
             using (var format = new StringFormat
@@ -929,11 +943,15 @@ namespace CodexLocalDashboard
                 LineAlignment = StringAlignment.Center
             })
             {
+                if (historyMode)
+                    graphics.FillRectangle(activeBrush, historyBounds);
                 graphics.DrawRectangle(border, historyBounds.X,
                     historyBounds.Y, historyBounds.Width - 1,
                     historyBounds.Height - 1);
                 graphics.DrawString("History", font, textBrush,
                     historyBounds, format);
+                if (detailMode)
+                    graphics.FillRectangle(activeBrush, detailBounds);
                 graphics.DrawRectangle(border, detailBounds.X,
                     detailBounds.Y, detailBounds.Width - 1,
                     detailBounds.Height - 1);
@@ -941,8 +959,9 @@ namespace CodexLocalDashboard
                     detailBounds, format);
             }
 
-            // Both chart modes share one 1h-48h in-memory timeline.
-            // Background capture continues while either mode is hidden.
+            // Real-time, History and Detail share the same chart region.
+            // Background capture and five-minute history writes continue while
+            // either embedded view is visible.
             var chartScale = canvas.Width / (float)DesignWidth;
             var chartVisualScale = Math.Max(.75f, chartScale / Math.Max(1f, dpiScale));
             if (detailMode)
@@ -955,6 +974,16 @@ namespace CodexLocalDashboard
                 projectDetailChart.Draw(graphics, detailViewBounds,
                     CurrentTheme,
                     chartVisualScale);
+            }
+            else if (historyMode)
+            {
+                var historyViewBounds = new RectangleF(
+                    canvas.Left + 14f * chartScale,
+                    canvas.Top + 100f * chartScale,
+                    292f * chartScale,
+                    239f * chartScale);
+                historyPanelChart.Draw(graphics, historyViewBounds,
+                    CurrentTheme, chartVisualScale);
             }
             else
             {
@@ -1140,7 +1169,7 @@ namespace CodexLocalDashboard
         {
             if (stripMode || canvas.Width <= 0) return false;
             var scale = canvas.Width / (float)DesignWidth;
-            return detailMode
+            return detailMode || historyMode
                 ? new RectangleF(14f * scale, 100f * scale,
                     292f * scale, 239f * scale).Contains(point)
                 : new RectangleF(14f * scale, 156f * scale,
@@ -1150,6 +1179,7 @@ namespace CodexLocalDashboard
         private void SetDetailMode(bool value)
         {
             if (detailMode == value) return;
+            if (value && historyMode) SetHistoryMode(false);
             detailMode = value;
             if (value)
                 BeginLoadProjectDetails();
@@ -1168,8 +1198,101 @@ namespace CodexLocalDashboard
                 LayoutSpec original;
                 if (layout.TryGetValue(control, out original) &&
                     original.Bounds.Top >= 102)
-                    control.Visible = !value;
+                    control.Visible = !(detailMode || historyMode);
             }
+        }
+
+        private void SetHistoryMode(bool value)
+        {
+            if (historyMode == value) return;
+            if (value && detailMode) SetDetailMode(false);
+            historyMode = value;
+            if (value)
+            {
+                historyPanelChart.SetDate(DateTime.Today);
+                BeginLoadHistory();
+            }
+            else
+            {
+                CancelHistoryLoad();
+                historyPanelChart.Clear();
+                historySelectionPending = false;
+                lastHistoryPanelPointerHint =
+                    HistoryPanelPointerHint.None;
+                canvas.Cursor = Cursors.Default;
+                tips.SetToolTip(canvas, null);
+                if (historyDatePicker != null &&
+                    !historyDatePicker.IsDisposed)
+                    historyDatePicker.Close();
+                historyDatePicker = null;
+            }
+            foreach (Control control in canvas.Controls)
+            {
+                LayoutSpec original;
+                if (layout.TryGetValue(control, out original) &&
+                    original.Bounds.Top >= 102)
+                    control.Visible = !(detailMode || historyMode);
+            }
+        }
+
+        private async void BeginLoadHistory()
+        {
+            CancelHistoryLoad();
+            if (!historyMode) return;
+            var cancellation = new CancellationTokenSource();
+            historyLoadCancellation = cancellation;
+            historyPanelChart.SetLoading(true);
+            RenderLayeredSurface();
+            var selectedDate = historyPanelChart.SelectedDate;
+            var from = new DateTimeOffset(selectedDate);
+            var to = from.AddDays(1);
+            try
+            {
+                var samples = await Task.Run(() => historyStore.ReadRange(
+                    from, to, cancellation.Token), cancellation.Token);
+                if (cancellation.IsCancellationRequested || IsDisposed ||
+                    !historyMode ||
+                    !ReferenceEquals(historyLoadCancellation, cancellation) ||
+                    historyPanelChart.SelectedDate != selectedDate)
+                    return;
+                historyPanelChart.SetSamples(samples, historyStore.FileSize);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception)
+            {
+                if (!cancellation.IsCancellationRequested && !IsDisposed &&
+                    historyMode &&
+                    ReferenceEquals(historyLoadCancellation, cancellation))
+                    historyPanelChart.SetLoadError();
+            }
+            finally
+            {
+                if (ReferenceEquals(historyLoadCancellation, cancellation))
+                {
+                    historyLoadCancellation = null;
+                    if (!IsDisposed && historyMode)
+                    {
+                        historyPanelChart.SetLoading(false);
+                        RenderLayeredSurface();
+                    }
+                }
+                cancellation.Dispose();
+            }
+        }
+
+        private void LoadHistoryDate(DateTime value)
+        {
+            historyPanelChart.SetDate(value);
+            BeginLoadHistory();
+        }
+
+        private void CancelHistoryLoad()
+        {
+            var cancellation = historyLoadCancellation;
+            historyLoadCancellation = null;
+            if (cancellation == null) return;
+            try { cancellation.Cancel(); }
+            catch (ObjectDisposedException) { }
         }
 
         private async void BeginLoadProjectDetails()
@@ -1284,22 +1407,96 @@ namespace CodexLocalDashboard
                 50f * scale, 18f * scale).Contains(point);
         }
 
-        private void ShowHistory()
+        private void HandleHistoryAction(HistoryPanelClickResult result)
         {
-            if (historyForm == null || historyForm.IsDisposed)
+            switch (result)
             {
-                historyForm = new HistoryDashboardForm(historyStore,
-                    CurrentTheme);
-                historyForm.FormClosed += delegate { historyForm = null; };
-                historyForm.Show();
+                case HistoryPanelClickResult.Close:
+                    SetHistoryMode(false);
+                    break;
+                case HistoryPanelClickResult.PreviousDay:
+                    LoadHistoryDate(historyPanelChart.SelectedDate.AddDays(-1));
+                    break;
+                case HistoryPanelClickResult.NextDay:
+                    LoadHistoryDate(historyPanelChart.SelectedDate.AddDays(1));
+                    break;
+                case HistoryPanelClickResult.PickDate:
+                    ShowHistoryDatePicker();
+                    break;
+                case HistoryPanelClickResult.OpenStorage:
+                    OpenHistoryStorage();
+                    break;
             }
-            else
+        }
+
+        private static string HistoryPointerText(
+            HistoryPanelPointerHint hint)
+        {
+            switch (hint)
             {
-                if (historyForm.WindowState == FormWindowState.Minimized)
-                    historyForm.WindowState = FormWindowState.Normal;
-                historyForm.Show();
-                historyForm.Activate();
+                case HistoryPanelPointerHint.Close:
+                    return "关闭历史数据";
+                case HistoryPanelPointerHint.PreviousDay:
+                    return "前一天";
+                case HistoryPanelPointerHint.PickDate:
+                    return "选择日期";
+                case HistoryPanelPointerHint.NextDay:
+                    return "后一天";
+                case HistoryPanelPointerHint.OpenStorage:
+                    return "打开历史数据保存位置";
+                case HistoryPanelPointerHint.SelectSeries:
+                    return "切换历史数据类型";
+                case HistoryPanelPointerHint.SelectRange:
+                    return "左键框选范围，滚轮缩放时间轴";
+                default:
+                    return null;
             }
+        }
+
+        private void ShowHistoryDatePicker()
+        {
+            if (historyDatePicker != null &&
+                !historyDatePicker.IsDisposed)
+            {
+                historyDatePicker.Activate();
+                return;
+            }
+            historyDatePicker = new HistoryDatePickerPopup(
+                historyPanelChart.SelectedDate, delegate(DateTime selected)
+                {
+                    if (historyMode) LoadHistoryDate(selected);
+                });
+            historyDatePicker.TopMost = TopMost;
+            historyDatePicker.FormClosed += delegate
+            {
+                historyDatePicker = null;
+            };
+            var desired = PointToScreen(new Point(
+                Math.Max(0, ClientSize.Width / 2 -
+                    historyDatePicker.Width / 2),
+                Math.Min(ClientSize.Height, (int)(150 * dpiScale))));
+            var area = Screen.FromPoint(desired).WorkingArea;
+            historyDatePicker.Location = new Point(
+                Math.Max(area.Left, Math.Min(area.Right -
+                    historyDatePicker.Width, desired.X)),
+                Math.Max(area.Top, Math.Min(area.Bottom -
+                    historyDatePicker.Height, desired.Y)));
+            historyDatePicker.Show(this);
+        }
+
+        private void OpenHistoryStorage()
+        {
+            try
+            {
+                var folder = historyStore.StorageDirectory;
+                if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
+                var arguments = File.Exists(historyStore.StoragePath)
+                    ? "/select,\"" + historyStore.StoragePath + "\""
+                    : "\"" + folder + "\"";
+                Process.Start(new ProcessStartInfo("explorer.exe", arguments)
+                { UseShellExecute = true });
+            }
+            catch { }
         }
 
         private void HandleChartWheel(object sender, MouseEventArgs e)
@@ -1310,6 +1507,14 @@ namespace CodexLocalDashboard
             var point = canvas.PointToClient(
                 source.PointToScreen(e.Location));
             if (!IsChartPoint(point)) return;
+            if (historyMode)
+            {
+                var absolute = new PointF(canvas.Left + point.X,
+                    canvas.Top + point.Y);
+                if (historyPanelChart.Zoom(e.Delta, absolute))
+                    RenderLayeredSurface();
+                return;
+            }
             if (detailMode)
             {
                 if (projectDetailChart.Scroll(e.Delta))
@@ -1344,9 +1549,12 @@ namespace CodexLocalDashboard
             }
             if (ReferenceEquals(sender, canvas) && IsChartPoint(e.Location))
             {
-                if (detailMode)
+                if (detailMode || historyMode)
                 {
                     chartClickPending = true;
+                    historySelectionPending = historyMode &&
+                        historyPanelChart.BeginSelection(new PointF(
+                            canvas.Left + e.X, canvas.Top + e.Y));
                     dragging = false;
                     canvas.Capture = true;
                 }
@@ -1367,6 +1575,21 @@ namespace CodexLocalDashboard
 
         private void ContinueDrag(object sender, MouseEventArgs e)
         {
+            if (chartClickPending && historyMode &&
+                historySelectionPending)
+            {
+                var sourceControl = sender as Control;
+                if (sourceControl != null)
+                {
+                    var localPoint = canvas.PointToClient(
+                        sourceControl.PointToScreen(e.Location));
+                    if (historyPanelChart.UpdateSelection(new PointF(
+                        canvas.Left + localPoint.X,
+                        canvas.Top + localPoint.Y)))
+                        RenderLayeredSurface();
+                }
+                return;
+            }
             if (!dragging)
             {
                 var source = sender as Control;
@@ -1374,8 +1597,8 @@ namespace CodexLocalDashboard
                 {
                     var local = canvas.PointToClient(
                         source.PointToScreen(e.Location));
-                    var historyHint = IsHistoryPoint(local);
-                    var hint = historyHint
+                    var historyButtonHint = IsHistoryPoint(local);
+                    var hint = historyButtonHint
                         ? ProjectDetailPointerHint.DetailButton
                         : IsDetailPoint(local)
                         ? ProjectDetailPointerHint.DetailButton
@@ -1384,15 +1607,31 @@ namespace CodexLocalDashboard
                                 new PointF(canvas.Left + local.X,
                                     canvas.Top + local.Y))
                             : ProjectDetailPointerHint.None;
+                    var panelHint = historyMode
+                        ? historyPanelChart.PointerHint(new PointF(
+                            canvas.Left + local.X,
+                            canvas.Top + local.Y))
+                        : HistoryPanelPointerHint.None;
                     if (hint != lastDetailPointerHint ||
-                        historyHint != lastHistoryPointer)
+                        historyButtonHint != lastHistoryButtonPointer ||
+                        panelHint != lastHistoryPanelPointerHint)
                     {
                         lastDetailPointerHint = hint;
-                        lastHistoryPointer = historyHint;
-                        canvas.Cursor = hint == ProjectDetailPointerHint.None
-                            ? Cursors.Default : Cursors.Hand;
-                        tips.SetToolTip(canvas,
-                            historyHint ? "查看历史数据" :
+                        lastHistoryButtonPointer = historyButtonHint;
+                        lastHistoryPanelPointerHint = panelHint;
+                        canvas.Cursor = panelHint ==
+                            HistoryPanelPointerHint.SelectRange
+                            ? Cursors.Cross
+                            : panelHint != HistoryPanelPointerHint.None ||
+                                hint != ProjectDetailPointerHint.None
+                                ? Cursors.Hand : Cursors.Default;
+                        tips.SetToolTip(canvas, panelHint !=
+                            HistoryPanelPointerHint.None
+                            ? HistoryPointerText(panelHint)
+                            : historyButtonHint
+                                ? (historyMode
+                                    ? "关闭历史数据"
+                                    : "查看历史数据") :
                             hint == ProjectDetailPointerHint.Close
                                 ? "关闭用量明细"
                                 : hint ==
@@ -1426,7 +1665,11 @@ namespace CodexLocalDashboard
                 historyClickPending = false;
                 dragging = false;
                 canvas.Capture = false;
-                if (showHistory) ShowHistory();
+                if (showHistory)
+                {
+                    SetHistoryMode(!historyMode);
+                    RenderLayeredSurface();
+                }
                 return;
             }
             if (detailClickPending)
@@ -1450,9 +1693,24 @@ namespace CodexLocalDashboard
                 chartClickPending = false;
                 dragging = false;
                 canvas.Capture = false;
+                var historyAbsolute = new PointF(canvas.Left + e.X,
+                    canvas.Top + e.Y);
+                if (historyMode && historySelectionPending)
+                {
+                    historyPanelChart.EndSelection(historyAbsolute);
+                    RenderLayeredSurface();
+                }
                 if (switchMode)
                 {
-                    if (detailMode)
+                    if (historyMode)
+                    {
+                        if (!historySelectionPending)
+                            HandleHistoryAction(
+                                historyPanelChart.HandleClick(
+                                    historyAbsolute));
+                        RenderLayeredSurface();
+                    }
+                    else if (detailMode)
                     {
                         var result = projectDetailChart.HandleClick(
                             new PointF(canvas.Left + e.X,
@@ -1462,6 +1720,7 @@ namespace CodexLocalDashboard
                         RenderLayeredSurface();
                     }
                 }
+                historySelectionPending = false;
                 return;
             }
             dragging = false;
@@ -1496,10 +1755,12 @@ namespace CodexLocalDashboard
             }
             refreshCancellation.Cancel();
             CancelDetailLoad();
+            CancelHistoryLoad();
             projectDetailChart.Clear();
+            historyPanelChart.Clear();
             scanner.Dispose();
-            if (historyForm != null && !historyForm.IsDisposed)
-                historyForm.Close();
+            if (historyDatePicker != null && !historyDatePicker.IsDisposed)
+                historyDatePicker.Close();
             historyStore.Dispose();
             countdownTimer.Stop();
             followTimer.Stop();
