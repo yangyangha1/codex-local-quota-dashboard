@@ -8,9 +8,9 @@
     <AssemblyName>CodexLocalDashboard</AssemblyName>
     <RootNamespace>CodexLocalDashboard</RootNamespace>
     <ApplicationIcon>dashboard.ico</ApplicationIcon>
-    <Version>1.4.1</Version>
-    <AssemblyVersion>1.4.1.0</AssemblyVersion>
-    <FileVersion>1.4.1.0</FileVersion>
+    <Version>1.5.0</Version>
+    <AssemblyVersion>1.5.0.0</AssemblyVersion>
+    <FileVersion>1.5.0.0</FileVersion>
     <Product>Codex Local Quota Dashboard</Product>
     <Description>Offline Windows dashboard for locally cached Codex quota and token usage.</Description>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
@@ -22,6 +22,8 @@
     <Compile Include="Program.Framework.cs" />
     <Compile Include="TokenRateChart.cs" />
     <Compile Include="ProjectDetail.cs" />
+    <Compile Include="HistoryStore.cs" />
+    <Compile Include="HistoryDashboard.cs" />
     <Reference Include="System.Web.Extensions" />
   </ItemGroup>
 </Project>

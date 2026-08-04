@@ -24,12 +24,13 @@
 
 ## 快速使用
 
-1. 获取 `CodexLocalQuotaDashboard-v1.4.1.exe`。
+1. 获取 `CodexLocalQuotaDashboard-v1.5.0.exe`。
 2. 双击运行，程序会自动扫描 `%USERPROFILE%\.codex\sessions` 和 `archived_sessions`，无需安装和登录。
 3. 仪表盘会显示最近的本地额度快照，以及今日、近 7 天和近 30 天 Token 用量。
 4. 左键点击托盘图标可直接显示缓存快照仪表盘；在仪表盘任意位置点击右键，可切换顶部横条、调整背景透明度或设置开机启动。
 5. 拖动仪表盘内容可移动窗口；拖动边缘或四角可整体缩放。
-6. 鼠标位于折线图上时滚动滚轮，可在 1h、2h、3h、6h、12h、24h 和 48h 时间轴之间切换，默认 2h；点击 `Detail` 可在图表区域查看本机各项目与 session 的 Token 用量，再次点击或按明细右上角 `×` 返回图表。
+6. 实时折线图底部显示时间刻度；鼠标位于图表上时滚动滚轮，可在 1h、2h、3h、6h、12h、24h 和 48h 时间轴之间切换，默认 2h。点击 `Detail` 可在图表区域查看本机各项目与 session 的 Token 用量，再次点击或按明细右上角 `×` 返回图表。
+7. 点击 `History` 可像 `Detail` 一样在主界面图表区域切换到历史模式，再次点击或按历史视图右上角 `×` 返回实时图表；历史日期可直接输入或用左右箭头切换，按 `确认 / 刷新` 后加载输入日期，未编辑日期时则刷新当前日期。图表复用实时图表的颜色、曲线、坐标与 1h／2h／3h／6h／12h／24h／48h 滚轮档位。左键框选可局部放大，滚轮切换档位时自动取消框选；48h 会自动读取前一天数据。
 
 ## 功能特点
 
@@ -37,7 +38,10 @@
 - **额度快照**：显示本地日志中最近记录的额度剩余百分比和重置时间。
 - **额度颜色提示**：进度条按剩余额度在绿、黄绿、琥珀、橙、橙红和红色之间连续渐变。
 - **用量统计**：汇总今日、近 7 天和近 30 天的 Token 总量。
-- **内存时间轴**：两种折线图都在后台持续取点，支持滚轮切换 1h～48h，不写入额外历史文件。
+- **实时内存时间轴**：两种实时折线图都在后台持续取点，支持滚轮切换 1h～48h。
+- **本地历史数据**：软件启动并成功扫描后，每 5 分钟最多写入一条 Input、Output、Cached、Reasoning 完整增量，并保存绘制同款实时图表所需的四类源计数、本地额度快照和 Token 速率；不保存提示词、回复、会话名称、项目路径或 7 天／30 天快照。
+- **按需历史读取**：只有进入 `History` 模式才读取历史文件，退出或切换到 `Detail` 后立即取消读取；读取使用独立只读句柄，不阻塞常驻写入。
+- **兼容单文件与空间上限**：优先继续增量使用格式兼容的 `%LOCALAPPDATA%\CodexLocalDashboard\usage-history-v3.bin`；额度字段写入现有保留字节，不改变文件头或 96 字节记录长度。只有检测到现有文件格式不兼容时才选择新文件，旧文件不覆盖。文件超过 8 MB 后自动低频分级压缩，不生成每日零散日志。
 - **项目明细**：点击 `Detail` 后才在后台读取本地项目、会话、模型、Token 构成和工具调用等明细；关闭后清空明细对象并释放工作集，普通图表模式不常驻这些数据。
 - **桌面仪表盘**：无标题栏的紧凑窗口，支持拖动、四边缩放和整体等比缩放。
 - **Codex 顶部横条**：自动贴附到 Codex 窗口顶部，并保持在 Codex 内容区域前层。
@@ -79,7 +83,8 @@ msbuild CodexLocalDashboard.csproj /p:Configuration=Release
   /reference:System.dll /reference:System.Core.dll `
   /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
   /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll `
-  Program.Framework.cs TokenRateChart.cs ProjectDetail.cs
+  Program.Framework.cs TokenRateChart.cs ProjectDetail.cs `
+  HistoryStore.cs HistoryDashboard.cs
 ```
 
 ## 已知限制
