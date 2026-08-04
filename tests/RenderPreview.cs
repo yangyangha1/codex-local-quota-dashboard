@@ -102,17 +102,20 @@ namespace CodexLocalDashboard
                             BindingFlags.Instance | BindingFlags.NonPublic)
                         .GetValue(form);
                     history.SetDate(DateTime.Today);
+                    history.SetAvailableDates(new[] { DateTime.Today,
+                        DateTime.Today.AddDays(-1),
+                        DateTime.Today.AddDays(-3) });
                     var historySamples = new List<HistorySample>();
                     var historyStart = new DateTimeOffset(DateTime.Today);
-                    for (var index = 0; index < 180; index++)
+                    for (var index = 0; index < 720; index++)
                         historySamples.Add(new HistorySample(
-                            historyStart.AddMinutes(index * 5),
+                            historyStart.AddSeconds(index * 30),
+                            160, 45, 80, 12, index == 0,
                             18000 + index * 160L,
                             6200 + index * 45L,
                             5100 + index * 80L,
-                            900 + index * 12L, index == 0,
-                            0, 0, 0, 0,
-                            88d - index * 25d / 179d,
+                            900 + index * 12L,
+                            88d - index * 25d / 719d,
                             10080, resetAt,
                             4840d + index * 41d));
                     history.SetSamples(historySamples, 184320);

@@ -207,15 +207,16 @@ namespace CodexLocalDashboard
         }
 
         /// <summary>
-        /// 将磁盘中的五分钟增量转换成实时图表使用的同一组内部曲线。
-        /// 不改变历史文件格式，也不复制绘图或滚轮逻辑。
+        /// 将磁盘中的 30 秒原始源计数按实时采样路径重新播放。
+        /// 绘图、平滑、额度消耗、滚轮与框选逻辑因此完全共用。
         /// </summary>
-        internal void LoadHistoricalIncrements(
-            IList<HistorySample> samples)
+        internal void LoadHistoricalSamples(IList<HistorySample> samples,
+            DateTimeOffset origin)
         {
             lock (gate)
             {
                 ResetAllLocked(null);
+                chartOriginAt = origin;
                 historicalSource = true;
                 if (samples == null || samples.Count == 0) return;
                 var ordered = new List<HistorySample>(samples);
@@ -223,58 +224,18 @@ namespace CodexLocalDashboard
                 {
                     return left.At.CompareTo(right.At);
                 });
-                long cumulative = 0L;
-                HistorySample previous = null;
                 for (var index = 0; index < ordered.Count; index++)
                 {
                     var sample = ordered[index];
-                    if (previous != null && sample.At <= previous.At) continue;
-                    var increment = Math.Max(0L, sample.DeltaTokens);
-                    if (increment > long.MaxValue - cumulative)
-                        cumulative = long.MaxValue;
-                    else cumulative += increment;
-                    var gap = previous == null
-                        ? TimeSpan.Zero : sample.At - previous.At;
-                    var breakBefore = previous == null || sample.IsBaseline ||
-                        gap > TimeSpan.FromMinutes(10);
-                    counterHistory.Add(new TokenCounterSample(sample.At,
-                        cumulative, breakBefore));
-                    var minutes = previous == null
-                        ? 5d : Math.Max(1d, gap.TotalMinutes);
-                    var rate = sample.TokenRatePerMinute ??
-                        increment / minutes;
-                    tokenPoints.Add(new HistoryPoint(sample.At, rate,
-                        breakBefore));
-                    if (sample.RemainingPercent.HasValue)
-                    {
-                        var remaining = Math.Max(0d, Math.Min(100d,
-                            sample.RemainingPercent.Value));
-                        var quotaBreak = quotaSourcePoints.Count == 0 ||
-                            sample.WindowMinutes != quotaWindowMinutes ||
-                            !NullableDateEquals(sample.ResetsAt,
-                                quotaResetsAt) ||
-                            (hasQuotaSource && remaining >
-                                lastQuotaSource + QuotaResetRiseThreshold);
-                        AppendContinuousPointLocked(quotaPoints, sample.At,
-                            remaining);
-                        quotaSourcePoints.Add(new HistoryPoint(sample.At,
-                            remaining, quotaBreak));
-                        hasQuotaSource = true;
-                        lastQuotaSource = remaining;
-                        lastQuotaRemaining = remaining;
-                        quotaWindowMinutes = sample.WindowMinutes;
-                        quotaResetsAt = sample.ResetsAt;
-                    }
-                    previous = sample;
+                    var total = sample.SourceInput >
+                        long.MaxValue - sample.SourceOutput
+                        ? long.MaxValue
+                        : sample.SourceInput + sample.SourceOutput;
+                    Capture(sample.At, Math.Max(0L, total),
+                        sample.RemainingPercent, sample.WindowMinutes,
+                        sample.ResetsAt);
                 }
-                if (previous != null)
-                {
-                    chartOriginAt = ordered[0].At;
-                    lastCaptureAt = previous.At;
-                    lastTokenRate = tokenPoints.Count == 0
-                        ? (double?)null
-                        : tokenPoints[tokenPoints.Count - 1].Value;
-                }
+                historicalSource = true;
             }
         }
 
@@ -950,7 +911,7 @@ namespace CodexLocalDashboard
                 cumulativeIncrease,
                 CalculateQuotaConsumption(selectedQuotaSource),
                 timelineStart, axisEnd,
-                displayDuration);
+                displayDuration, historicalSource);
         }
 
         private List<HistoryPoint> BuildCumulativePointsLocked(
@@ -1238,7 +1199,8 @@ namespace CodexLocalDashboard
                                 snapshot.QuotaConsumedDuringRuntime) + " · " +
                             ((int)snapshot.DisplayDuration.TotalHours)
                                 .ToString(CultureInfo.InvariantCulture) + "h";
-                    var rateText = snapshot.CurrentTokenRate.HasValue
+                    var rateText = snapshot.Historical ? string.Empty :
+                        snapshot.CurrentTokenRate.HasValue
                         ? "速率 " +
                             FormatTokenCount(
                                 snapshot.CurrentTokenRate.Value) + "/分"
@@ -1859,6 +1821,7 @@ namespace CodexLocalDashboard
             public readonly DateTimeOffset TimelineStart;
             public readonly DateTimeOffset Now;
             public readonly TimeSpan DisplayDuration;
+            public readonly bool Historical;
 
             public RenderSnapshot(UsageChartMode mode,
                 List<HistoryPoint> tokenPoints,
@@ -1869,7 +1832,7 @@ namespace CodexLocalDashboard
                 double peakTokenRate, double cumulativeIncrease,
                 double quotaConsumedDuringRuntime,
                 DateTimeOffset timelineStart, DateTimeOffset now,
-                TimeSpan displayDuration)
+                TimeSpan displayDuration, bool historical)
             {
                 Mode = mode;
                 TokenPoints = tokenPoints;
@@ -1885,6 +1848,7 @@ namespace CodexLocalDashboard
                 TimelineStart = timelineStart;
                 Now = now;
                 DisplayDuration = displayDuration;
+                Historical = historical;
             }
         }
 

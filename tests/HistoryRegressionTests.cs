@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 
 namespace CodexLocalDashboard
@@ -17,7 +18,7 @@ namespace CodexLocalDashboard
             try
             {
                 Console.WriteLine("Running persistence test");
-                PersistsCompleteIncrementEveryFiveMinutes();
+                BuffersThirtySecondPointsAndFlushesEveryFiveMinutes();
                 Console.WriteLine("Running range test");
                 ReadsInclusiveDateRange();
                 Console.WriteLine("Running compatible quota extension test");
@@ -34,8 +35,10 @@ namespace CodexLocalDashboard
                 CancellingHistoryReadDoesNotBlockWriter();
                 Console.WriteLine("Running chart interaction test");
                 ChartSupportsWheelAndBrushZoom();
-                Console.WriteLine("Running manual date input test");
-                AcceptsManualDateInput();
+                Console.WriteLine("Running realtime replay test");
+                HistoricalReplayUsesRealtimeQuotaCalculation();
+                Console.WriteLine("Running seven-day status strip test");
+                SupportsSevenDayStatusStrip();
             }
             catch (Exception ex)
             {
@@ -49,35 +52,38 @@ namespace CodexLocalDashboard
             return failures == 0 ? 0 : 1;
         }
 
-        private static void PersistsCompleteIncrementEveryFiveMinutes()
+        private static void BuffersThirtySecondPointsAndFlushesEveryFiveMinutes()
         {
             WithStore(delegate(HistoryStore store, string path)
             {
-                var at = new DateTimeOffset(2026, 8, 4, 9, 15, 5,
+                var at = new DateTimeOffset(2026, 8, 4, 9, 15, 0,
                     TimeSpan.FromHours(8));
-                store.Record(Snapshot(100, 20, 30, 4), at);
-                store.Record(Snapshot(130, 25, 40, 5), at.AddMinutes(1));
-                store.Record(Snapshot(160, 35, 50, 6), at.AddMinutes(5));
+                for (var index = 0; index < 10; index++)
+                    store.Record(Snapshot(100 + index * 10,
+                        20 + index * 2, 30 + index * 3, 4 + index),
+                        at.AddSeconds(index * 30));
+                True(!File.Exists(path),
+                    "points stay in memory until the five-minute boundary");
+                store.Record(Snapshot(200, 40, 60, 14), at.AddMinutes(5));
                 var samples = store.ReadAll();
-                Equal(2, samples.Count,
-                    "same five-minute bucket is coalesced");
+                Equal(10, samples.Count,
+                    "five-minute flush writes every thirty-second point");
                 True(samples[0].IsBaseline,
                     "first record is marked as a baseline");
                 Equal(0L, samples[0].DeltaInput,
-                    "baseline is not counted as a five-minute increment");
-                Equal(60L, samples[1].DeltaInput,
-                    "next record contains five-minute input increment");
-                Equal(15L, samples[1].DeltaOutput,
-                    "next record contains five-minute output increment");
-                Equal(20L, samples[1].DeltaCached,
-                    "cached increment is retained independently");
-                Equal(2L, samples[1].DeltaReasoning,
-                    "reasoning increment is retained independently");
+                    "baseline is not counted as an increment");
+                Equal(10L, samples[1].DeltaInput,
+                    "each thirty-second input increment is retained");
+                Equal(2L, samples[1].DeltaOutput,
+                    "each thirty-second output increment is retained");
                 True(samples[1].TokenRatePerMinute.HasValue &&
-                    Math.Abs(samples[1].TokenRatePerMinute.Value - 15d) < .01d,
-                    "five-minute token rate is stored in reserved bytes");
+                    Math.Abs(samples[1].TokenRatePerMinute.Value - 24d) < .01d,
+                    "thirty-second token rate is stored");
+                store.FlushPending();
+                Equal(11, store.ReadAll().Count,
+                    "the active bucket is flushed without dropping points");
                 True(new FileInfo(path).Length == 16 +
-                    HistoryStore.RecordSize * 2,
+                    HistoryStore.RecordSize * 11,
                     "history file uses fixed-size records");
             });
         }
@@ -91,6 +97,7 @@ namespace CodexLocalDashboard
                     2026, 8, 3, 23, 55, 0, local));
                 store.Record(Snapshot(200, 20, 8, 3), new DateTimeOffset(
                     2026, 8, 4, 0, 0, 0, local));
+                store.FlushPending();
                 var selected = store.ReadRange(new DateTimeOffset(
                     2026, 8, 4, 0, 0, 0, local), new DateTimeOffset(
                     2026, 8, 5, 0, 0, 0, local));
@@ -110,6 +117,7 @@ namespace CodexLocalDashboard
                     TimeSpan.FromHours(8));
                 store.Record(Snapshot(100, 20, 10, 2, 62.35d,
                     10080, reset), at);
+                store.FlushPending();
                 var sample = store.ReadAll().Single();
                 True(sample.RemainingPercent.HasValue,
                     "quota is stored in compatible reserved bytes");
@@ -134,13 +142,17 @@ namespace CodexLocalDashboard
             try
             {
                 var compatiblePath = Path.Combine(compatibleFolder,
-                    "usage-history-v3.bin");
+                    "codex-usage-history-from" +
+                    DateTime.Today.ToString("yyyyMMdd") + "-v1.5.0.bin");
                 using (var store = new HistoryStore(compatiblePath))
+                {
                     store.Record(Snapshot(100, 20, 4, 1),
                         DateTimeOffset.Now);
+                    store.FlushPending();
+                }
                 Equal(compatiblePath,
                     HistoryStore.ResolveStoragePath(compatibleFolder),
-                    "compatible v3 file is reused for incremental appends");
+                    "compatible v1.5.0 file is reused for incremental appends");
             }
             finally
             {
@@ -152,11 +164,14 @@ namespace CodexLocalDashboard
             Directory.CreateDirectory(incompatibleFolder);
             try
             {
+                var preferred = "codex-usage-history-from" +
+                    DateTime.Today.ToString("yyyyMMdd") + "-v1.5.0.bin";
                 var incompatiblePath = Path.Combine(incompatibleFolder,
-                    "usage-history-v3.bin");
+                    preferred);
                 File.WriteAllBytes(incompatiblePath, new byte[16]);
                 Equal(Path.Combine(incompatibleFolder,
-                        "usage-history-v4.bin"),
+                        Path.GetFileNameWithoutExtension(preferred) +
+                        "-2.bin"),
                     HistoryStore.ResolveStoragePath(incompatibleFolder),
                     "incompatible file is preserved and a new path is chosen");
             }
@@ -175,7 +190,10 @@ namespace CodexLocalDashboard
             try
             {
                 using (var store = new HistoryStore(path))
+                {
                     store.Record(Snapshot(100, 20, 4, 1), DateTimeOffset.Now);
+                    store.FlushPending();
+                }
                 using (var output = new FileStream(path, FileMode.Append,
                     FileAccess.Write, FileShare.None))
                     output.Write(new byte[11], 0, 11);
@@ -185,6 +203,7 @@ namespace CodexLocalDashboard
                         "incomplete tail is ignored after an interrupted write");
                     reopened.Record(Snapshot(200, 40, 8, 2),
                         DateTimeOffset.Now.AddMinutes(5));
+                    reopened.FlushPending();
                     Equal(2, reopened.ReadAll().Count,
                         "new records remain aligned after tail recovery");
                 }
@@ -204,8 +223,11 @@ namespace CodexLocalDashboard
             try
             {
                 using (var store = new HistoryStore(path))
+                {
                     store.Record(Snapshot(123456, 789, 456, 12),
                         DateTimeOffset.Now);
+                    store.FlushPending();
+                }
                 var bytes = File.ReadAllBytes(path);
                 var text = System.Text.Encoding.UTF8.GetString(bytes);
                 True(text.IndexOf("prompt", StringComparison.OrdinalIgnoreCase)
@@ -235,21 +257,24 @@ namespace CodexLocalDashboard
                     first.Record(Snapshot(100, 20, 10, 2), at);
                     second.Record(Snapshot(130, 25, 12, 3),
                         at.AddMinutes(2));
-                    Equal(1, first.ReadAll().Count,
-                        "second process skips an existing timestamp");
+                    first.FlushPending();
+                    second.FlushPending();
+                    Equal(2, first.ReadAll().Count,
+                        "different process timestamps are both retained");
 
                     second.Record(Snapshot(160, 35, 18, 5),
                         at.AddMinutes(5));
+                    second.FlushPending();
                     var samples = first.ReadAll();
-                    Equal(2, samples.Count,
+                    Equal(3, samples.Count,
                         "a later timestamp is appended once");
-                    Equal(60L, samples[1].DeltaInput,
+                    Equal(30L, samples[2].DeltaInput,
                         "later writer derives input from persisted source");
-                    Equal(15L, samples[1].DeltaOutput,
+                    Equal(10L, samples[2].DeltaOutput,
                         "later writer derives output from persisted source");
-                    Equal(8L, samples[1].DeltaCached,
+                    Equal(6L, samples[2].DeltaCached,
                         "later writer retains cached increment");
-                    Equal(3L, samples[1].DeltaReasoning,
+                    Equal(2L, samples[2].DeltaReasoning,
                         "later writer retains reasoning increment");
                 }
             }
@@ -266,6 +291,7 @@ namespace CodexLocalDashboard
                 var at = new DateTimeOffset(2026, 8, 4, 16, 0, 0,
                     TimeSpan.FromHours(8));
                 store.Record(Snapshot(100, 20, 10, 2), at);
+                store.FlushPending();
                 using (var cancellation = new CancellationTokenSource())
                 {
                     cancellation.Cancel();
@@ -279,6 +305,7 @@ namespace CodexLocalDashboard
                     True(cancelled, "history read observes cancellation");
                 }
                 store.Record(Snapshot(150, 30, 15, 4), at.AddMinutes(5));
+                store.FlushPending();
                 Equal(2, store.ReadAll().Count,
                     "cancelled history read does not affect writing");
             });
@@ -289,6 +316,8 @@ namespace CodexLocalDashboard
             var chart = new HistoryPanelChart();
             var selectedDate = new DateTime(2026, 8, 1);
             chart.SetDate(selectedDate);
+            chart.SetAvailableDates(new[] { selectedDate,
+                selectedDate.AddDays(-2) });
             var from = new DateTimeOffset(selectedDate);
             var samples = new List<HistorySample>();
             for (var index = 0; index < 288; index++)
@@ -301,12 +330,19 @@ namespace CodexLocalDashboard
             {
                 chart.Draw(graphics, new RectangleF(14, 14, 292, 239),
                     ThemeMode.Dark, 1f);
-                Equal(HistoryPanelClickResult.ConfirmRefresh,
-                    chart.HandleClick(new PointF(263f, 50f)),
-                    "extended date row exposes confirm and refresh action");
                 Equal(HistoryPanelClickResult.OpenStorage,
                     chart.HandleClick(new PointF(246f, 24f)),
                     "storage action is placed on the upper row");
+                var selectedBounds = chart.DayBounds(5);
+                Equal(HistoryPanelClickResult.SelectDate,
+                    chart.HandleClick(new PointF(selectedBounds.Left + 2f,
+                        selectedBounds.Top + 2f)),
+                    "blue status square selects its day immediately");
+                var unavailableBounds = chart.DayBounds(4);
+                Equal(HistoryPanelClickResult.None,
+                    chart.HandleClick(new PointF(unavailableBounds.Left + 2f,
+                        unavailableBounds.Top + 2f)),
+                    "gray status square is disabled");
                 var before = chart.ViewDuration;
                 var center = new PointF(chart.PlotBounds.Left +
                     chart.PlotBounds.Width / 2f,
@@ -335,18 +371,50 @@ namespace CodexLocalDashboard
             }
         }
 
-        private static void AcceptsManualDateInput()
+        private static void SupportsSevenDayStatusStrip()
         {
             var chart = new HistoryPanelChart();
             chart.SetDate(new DateTime(2026, 8, 4));
-            chart.BeginDateEdit();
-            foreach (var value in "20260801")
-                chart.HandleDateCharacter(value);
-            DateTime selected;
-            True(chart.TryCommitDate(out selected),
-                "manual yyyyMMdd date is accepted");
-            Equal(new DateTime(2026, 8, 1), selected,
-                "manual date resolves to the selected day");
+            var before = chart.VisibleWeekStart;
+            True(chart.ShiftWeek(-1), "left arrow moves by seven days");
+            Equal(before.AddDays(-7), chart.VisibleWeekStart,
+                "status strip advances in seven-day units");
+            True(chart.ShiftWeek(1), "right arrow returns one week");
+            Equal(before, chart.VisibleWeekStart,
+                "right arrow returns to the current week");
+        }
+
+        private static void HistoricalReplayUsesRealtimeQuotaCalculation()
+        {
+            var panel = new HistoryPanelChart();
+            var day = new DateTime(2026, 8, 4);
+            panel.SetDate(day);
+            var from = new DateTimeOffset(day);
+            var reset = from.AddDays(7);
+            var values = new List<HistorySample>();
+            for (var index = 0; index <= 120; index++)
+                values.Add(new HistorySample(from.AddSeconds(index * 30),
+                    index == 0 ? 0 : 10, index == 0 ? 0 : 2, 0, 0,
+                    index == 0, 1000 + index * 10L,
+                    200 + index * 2L, 0, 0,
+                    90d - index / 12d, 10080, reset));
+            panel.SetSamples(values, 0);
+            var chart = typeof(HistoryPanelChart).GetField("chart",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+                .GetValue(panel);
+            var method = chart.GetType().GetMethod(
+                "BuildRenderSnapshotLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var snapshot = method.Invoke(chart,
+                new object[] { from.AddHours(1) });
+            var consumed = (double)snapshot.GetType().GetField(
+                "QuotaConsumedDuringRuntime").GetValue(snapshot);
+            True(consumed > 9.9d,
+                "history replays the realtime quota-consumption algorithm");
+            var historical = (bool)snapshot.GetType().GetField(
+                "Historical").GetValue(snapshot);
+            True(historical,
+                "history render state can hide the meaningless rate label");
         }
 
         private static UsageSnapshot Snapshot(long input, long output,

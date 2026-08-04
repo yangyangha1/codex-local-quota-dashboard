@@ -52,9 +52,29 @@ namespace CodexLocalDashboard
         }
     }
 
+    internal sealed class PendingHistorySample
+    {
+        public readonly DateTimeOffset At;
+        public readonly TokenTotals Totals;
+        public readonly double? RemainingPercent;
+        public readonly int WindowMinutes;
+        public readonly DateTimeOffset? ResetsAt;
+
+        public PendingHistorySample(DateTimeOffset at, TokenTotals totals,
+            double? remainingPercent, int windowMinutes,
+            DateTimeOffset? resetsAt)
+        {
+            At = at;
+            Totals = totals;
+            RemainingPercent = remainingPercent;
+            WindowMinutes = windowMinutes;
+            ResetsAt = resetsAt;
+        }
+    }
+
     /// <summary>
-    /// 多进程安全的单文件增量历史库。每个五分钟时间标签只追加一次，
-    /// 不覆盖旧记录；History 全量读取与常驻写入使用独立文件句柄。
+    /// 每 30 秒缓冲完整数据点，每 5 分钟批量追加；跨进程按时间标签
+    /// 去重，不覆盖旧记录。History 读取与常驻写入使用独立文件句柄。
     /// </summary>
     internal sealed class HistoryStore : IDisposable
     {
@@ -70,18 +90,27 @@ namespace CodexLocalDashboard
         private readonly object gate = new object();
         private readonly string storagePath;
         private readonly string mutexName;
-        private DateTimeOffset? lastHandledBucket;
+        private readonly bool includeCompatibleFiles;
+        private readonly List<PendingHistorySample> pending =
+            new List<PendingHistorySample>(12);
+        private DateTimeOffset? pendingFiveMinuteBucket;
         private DateTime lastCompactionDate;
         private bool disposed;
 
         public HistoryStore()
-            : this(ResolveDefaultStoragePath())
+            : this(ResolveDefaultStoragePath(), true)
         {
         }
 
         internal HistoryStore(string path)
+            : this(path, false)
+        {
+        }
+
+        private HistoryStore(string path, bool includeCompatible)
         {
             storagePath = path;
+            includeCompatibleFiles = includeCompatible;
             mutexName = "Local\\CodexLocalDashboard-History-" +
                 PathHash(Path.GetFullPath(path));
         }
@@ -98,8 +127,8 @@ namespace CodexLocalDashboard
             {
                 try
                 {
-                    return File.Exists(storagePath)
-                        ? new FileInfo(storagePath).Length : 0L;
+                    return ReadablePaths().Where(File.Exists)
+                        .Sum(path => new FileInfo(path).Length);
                 }
                 catch { return 0L; }
             }
@@ -111,77 +140,105 @@ namespace CodexLocalDashboard
             lock (gate)
             {
                 ThrowIfDisposed();
-                var bucketMinute = capturedAt.Minute - capturedAt.Minute % 5;
-                var bucket = new DateTimeOffset(capturedAt.Year,
-                    capturedAt.Month, capturedAt.Day, capturedAt.Hour,
-                    bucketMinute, 0, capturedAt.Offset).ToUniversalTime();
-                // 扫描器可以高频刷新，但正常情况下每个实例在一个
-                // 五分钟槽位内只触碰历史文件一次。
-                if (lastHandledBucket.HasValue &&
-                    bucket <= lastHandledBucket.Value) return;
-                using (var mutex = new Mutex(false, mutexName))
+                var pointAt = FloorToThirtySeconds(capturedAt);
+                if (pending.Count > 0 &&
+                    pending[pending.Count - 1].At >= pointAt) return;
+                var fiveMinuteBucket = FloorToFiveMinutes(pointAt);
+                if (pendingFiveMinuteBucket.HasValue &&
+                    fiveMinuteBucket != pendingFiveMinuteBucket.Value)
                 {
-                    var acquired = false;
-                    try
-                    {
-                        try { acquired = mutex.WaitOne(TimeSpan.FromSeconds(2)); }
-                        catch (AbandonedMutexException) { acquired = true; }
-                        if (!acquired) return;
-                        EnsureFile();
-                        var previous = ReadLastSample();
-                        // 时间标签是唯一键。多实例遇到已经落盘的槽位时
-                        // 直接跳过，绝不覆盖或重复修改旧记录。
-                        if (previous != null && previous.At >= bucket)
-                        {
-                            lastHandledBucket = bucket;
-                            return;
-                        }
+                    if (FlushPendingLocked())
+                        pendingFiveMinuteBucket = fiveMinuteBucket;
+                }
+                if (!pendingFiveMinuteBucket.HasValue)
+                    pendingFiveMinuteBucket = fiveMinuteBucket;
+                var quota = snapshot.Quotas
+                    .OrderBy(value => value.WindowMinutes)
+                    .FirstOrDefault();
+                pending.Add(new PendingHistorySample(pointAt,
+                    snapshot.Today,
+                    quota == null ? (double?)null : Math.Max(0d,
+                        Math.Min(100d, 100d - quota.UsedPercent)),
+                    quota == null ? 0 : quota.WindowMinutes,
+                    quota == null ? (DateTimeOffset?)null : quota.ResetsAt));
+            }
+        }
 
-                        var baseline = previous == null ||
-                            previous.At.ToLocalTime().Date !=
-                                capturedAt.LocalDateTime.Date ||
-                            HasCounterRollback(snapshot.Today, previous);
-                        var delta = baseline ? new TokenTotals() :
-                            new TokenTotals(
-                                snapshot.Today.Input - previous.SourceInput,
-                                snapshot.Today.Output - previous.SourceOutput,
-                                snapshot.Today.Cached - previous.SourceCached,
-                                snapshot.Today.Reasoning -
-                                    previous.SourceReasoning);
-                        var quota = snapshot.Quotas
-                            .OrderBy(value => value.WindowMinutes)
-                            .FirstOrDefault();
-                        var sample = new HistorySample(bucket,
-                            Math.Max(0L, delta.Input),
-                            Math.Max(0L, delta.Output),
-                            Math.Max(0L, delta.Cached),
-                            Math.Max(0L, delta.Reasoning), baseline,
-                            snapshot.Today.Input, snapshot.Today.Output,
-                            snapshot.Today.Cached, snapshot.Today.Reasoning,
-                            quota == null ? (double?)null : Math.Max(0d,
-                                Math.Min(100d, 100d - quota.UsedPercent)),
-                            quota == null ? 0 : quota.WindowMinutes,
-                            quota == null ? (DateTimeOffset?)null :
-                                quota.ResetsAt,
-                            baseline || previous == null ? (double?)null :
-                                Math.Max(0d, delta.Total /
-                                    Math.Max(1d,
-                                        (bucket - previous.At).TotalMinutes)));
-                        Append(sample);
-                        lastHandledBucket = bucket;
-                        if (FileSize > MaximumFileBytes &&
-                            lastCompactionDate != DateTime.Today)
-                        {
-                            lastCompactionDate = DateTime.Today;
-                            Compact(capturedAt.ToUniversalTime());
-                        }
-                    }
-                    finally
+        internal void FlushPending()
+        {
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                FlushPendingLocked();
+            }
+        }
+
+        private bool FlushPendingLocked()
+        {
+            if (pending.Count == 0) return true;
+            using (var mutex = new Mutex(false, mutexName))
+            {
+                var acquired = false;
+                try
+                {
+                    try { acquired = mutex.WaitOne(TimeSpan.FromSeconds(2)); }
+                    catch (AbandonedMutexException) { acquired = true; }
+                    if (!acquired) return false;
+                    EnsureFile();
+                    var previous = ReadLastSample(storagePath);
+                    using (var output = new FileStream(storagePath,
+                        FileMode.Open, FileAccess.Write,
+                        FileShare.ReadWrite | FileShare.Delete, 4096,
+                        FileOptions.SequentialScan))
                     {
-                        if (acquired) mutex.ReleaseMutex();
+                        output.Position = output.Length;
+                        foreach (var value in pending)
+                        {
+                            if (previous != null && previous.At >= value.At)
+                                continue;
+                            var sample = BuildSample(value, previous);
+                            var bytes = Encode(sample);
+                            output.Write(bytes, 0, bytes.Length);
+                            previous = sample;
+                        }
+                        output.Flush(false);
                     }
+                    pending.Clear();
+                    if (new FileInfo(storagePath).Length > MaximumFileBytes &&
+                        lastCompactionDate != DateTime.Today)
+                    {
+                        lastCompactionDate = DateTime.Today;
+                        Compact(DateTimeOffset.UtcNow);
+                    }
+                    return true;
+                }
+                finally
+                {
+                    if (acquired) mutex.ReleaseMutex();
                 }
             }
+        }
+
+        private static HistorySample BuildSample(PendingHistorySample value,
+            HistorySample previous)
+        {
+            var baseline = previous == null ||
+                previous.At.ToLocalTime().Date != value.At.ToLocalTime().Date ||
+                HasCounterRollback(value.Totals, previous);
+            var delta = baseline ? new TokenTotals() : new TokenTotals(
+                value.Totals.Input - previous.SourceInput,
+                value.Totals.Output - previous.SourceOutput,
+                value.Totals.Cached - previous.SourceCached,
+                value.Totals.Reasoning - previous.SourceReasoning);
+            return new HistorySample(value.At,
+                Math.Max(0L, delta.Input), Math.Max(0L, delta.Output),
+                Math.Max(0L, delta.Cached), Math.Max(0L, delta.Reasoning),
+                baseline, value.Totals.Input, value.Totals.Output,
+                value.Totals.Cached, value.Totals.Reasoning,
+                value.RemainingPercent, value.WindowMinutes, value.ResetsAt,
+                baseline || previous == null ? (double?)null :
+                    Math.Max(0d, delta.Total / Math.Max(.5d,
+                        (value.At - previous.At).TotalMinutes)));
         }
 
         public List<HistorySample> ReadRange(DateTimeOffset fromInclusive,
@@ -197,14 +254,14 @@ namespace CodexLocalDashboard
             ThrowIfDisposed();
             var fromUtc = fromInclusive.ToUniversalTime();
             var toUtc = toExclusive.ToUniversalTime();
-            return ReadAllFile(cancellationToken).Where(sample =>
+            return ReadAllFiles(cancellationToken).Where(sample =>
                 sample.At >= fromUtc && sample.At < toUtc).ToList();
         }
 
         public List<HistorySample> ReadAll()
         {
             ThrowIfDisposed();
-            return ReadAllFile(CancellationToken.None);
+            return ReadAllFiles(CancellationToken.None);
         }
 
         private void EnsureFile()
@@ -231,9 +288,9 @@ namespace CodexLocalDashboard
             }
         }
 
-        private HistorySample ReadLastSample()
+        private static HistorySample ReadLastSample(string path)
         {
-            using (var input = new FileStream(storagePath, FileMode.Open,
+            using (var input = new FileStream(path, FileMode.Open,
                 FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
                 if (!HasValidHeader(input) ||
@@ -247,26 +304,12 @@ namespace CodexLocalDashboard
             }
         }
 
-        private void Append(HistorySample sample)
-        {
-            using (var output = new FileStream(storagePath, FileMode.Open,
-                FileAccess.Write, FileShare.ReadWrite | FileShare.Delete,
-                4096, FileOptions.SequentialScan))
-            {
-                output.Position = output.Length;
-                var bytes = Encode(sample);
-                output.Write(bytes, 0, bytes.Length);
-                // 只刷新托管缓冲，不使用 WriteThrough 或强制磁盘同步。
-                output.Flush(false);
-            }
-        }
-
-        private List<HistorySample> ReadAllFile(
+        private static List<HistorySample> ReadFile(string path,
             CancellationToken cancellationToken)
         {
             var output = new List<HistorySample>();
-            if (!File.Exists(storagePath)) return output;
-            using (var input = new FileStream(storagePath, FileMode.Open,
+            if (!File.Exists(path)) return output;
+            using (var input = new FileStream(path, FileMode.Open,
                 FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
                 if (!HasValidHeader(input)) return output;
@@ -285,9 +328,22 @@ namespace CodexLocalDashboard
             return output;
         }
 
+        private List<HistorySample> ReadAllFiles(
+            CancellationToken cancellationToken)
+        {
+            var merged = new Dictionary<long, HistorySample>();
+            foreach (var path in ReadablePaths())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var sample in ReadFile(path, cancellationToken))
+                    merged[sample.At.UtcDateTime.Ticks] = sample;
+            }
+            return merged.Values.OrderBy(value => value.At).ToList();
+        }
+
         private void Compact(DateTimeOffset nowUtc)
         {
-            var all = ReadAllFile(CancellationToken.None);
+            var all = ReadFile(storagePath, CancellationToken.None);
             if (all.Count == 0) return;
             var sevenDaysAgo = nowUtc.AddDays(-7);
             var ninetyDaysAgo = nowUtc.AddDays(-90);
@@ -392,7 +448,7 @@ namespace CodexLocalDashboard
                 var hasRate = sample.TokenRatePerMinute.HasValue;
                 writer.Write((sample.IsBaseline ? 1 : 0) |
                     (hasQuota ? 2 : 0) | (hasRate ? 4 : 0));
-                writer.Write(5);
+                writer.Write(30);
                 var quotaBasisPoints = hasQuota
                     ? (ushort)Math.Max(0, Math.Min(10000,
                         (int)Math.Round(sample.RemainingPercent.Value * 100d)))
@@ -532,6 +588,24 @@ namespace CodexLocalDashboard
                 CultureInfo.InvariantCulture);
         }
 
+        private static DateTimeOffset FloorToThirtySeconds(
+            DateTimeOffset value)
+        {
+            var second = value.Second < 30 ? 0 : 30;
+            return new DateTimeOffset(value.Year, value.Month, value.Day,
+                value.Hour, value.Minute, second, value.Offset)
+                .ToUniversalTime();
+        }
+
+        private static DateTimeOffset FloorToFiveMinutes(
+            DateTimeOffset value)
+        {
+            var local = value.ToLocalTime();
+            var minute = local.Minute - local.Minute % 5;
+            return new DateTimeOffset(local.Year, local.Month, local.Day,
+                local.Hour, minute, 0, local.Offset).ToUniversalTime();
+        }
+
         private static string ResolveDefaultStoragePath()
         {
             var folder = Path.Combine(Environment.GetFolderPath(
@@ -542,36 +616,68 @@ namespace CodexLocalDashboard
 
         internal static string ResolveStoragePath(string folder)
         {
-            var preferred = Path.Combine(folder,
-                "usage-history-v" + FormatVersion.ToString(
-                    CultureInfo.InvariantCulture) + ".bin");
+            var prefix = "codex-usage-history-from";
+            var suffix = "-v1.5.0.bin";
+            var preferred = Path.Combine(folder, prefix +
+                DateTime.Today.ToString("yyyyMMdd",
+                    CultureInfo.InvariantCulture) + suffix);
             if (!Directory.Exists(folder)) return preferred;
-
-            var candidates = new List<KeyValuePair<int, string>>();
+            var candidates = new List<string>();
             try
             {
                 foreach (var path in Directory.EnumerateFiles(folder,
-                    "usage-history-v*.bin", SearchOption.TopDirectoryOnly))
+                    prefix + "*-v1.5.0*.bin",
+                    SearchOption.TopDirectoryOnly))
                 {
-                    int suffix;
-                    if (!TryReadFileSuffix(path, out suffix)) continue;
-                    if (IsCompatibleFile(path))
-                        candidates.Add(new KeyValuePair<int, string>(
-                            suffix, path));
+                    if (IsCompatibleFile(path)) candidates.Add(path);
                 }
             }
             catch { }
             if (candidates.Count > 0)
-                return candidates.OrderByDescending(value => value.Key)
-                    .First().Value;
+                return candidates.OrderBy(value => value,
+                    StringComparer.OrdinalIgnoreCase).First();
             if (!File.Exists(preferred)) return preferred;
-
-            var next = FormatVersion + 1;
-            while (File.Exists(Path.Combine(folder, "usage-history-v" +
-                next.ToString(CultureInfo.InvariantCulture) + ".bin")))
+            var next = 2;
+            var candidate = Path.Combine(folder,
+                Path.GetFileNameWithoutExtension(preferred) + "-" + next +
+                ".bin");
+            while (File.Exists(candidate))
+            {
                 next++;
-            return Path.Combine(folder, "usage-history-v" +
-                next.ToString(CultureInfo.InvariantCulture) + ".bin");
+                candidate = Path.Combine(folder,
+                    Path.GetFileNameWithoutExtension(preferred) + "-" +
+                    next + ".bin");
+            }
+            return candidate;
+        }
+
+        private IEnumerable<string> ReadablePaths()
+        {
+            if (!includeCompatibleFiles) return new[] { storagePath };
+            var paths = new List<string>();
+            var folder = StorageDirectory;
+            if (Directory.Exists(folder))
+            {
+                try
+                {
+                    paths.AddRange(Directory.EnumerateFiles(folder,
+                        "usage-history-v*.bin",
+                        SearchOption.TopDirectoryOnly)
+                        .Where(IsCompatibleFile));
+                    paths.AddRange(Directory.EnumerateFiles(folder,
+                        "codex-usage-history-from*-v1.5.0*.bin",
+                        SearchOption.TopDirectoryOnly)
+                        .Where(IsCompatibleFile));
+                }
+                catch { }
+            }
+            if (!paths.Any(path => string.Equals(path, storagePath,
+                StringComparison.OrdinalIgnoreCase))) paths.Add(storagePath);
+            return paths.Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path.IndexOf("codex-usage-history-from",
+                    StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 0)
+                .ThenBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private static bool IsCompatibleFile(string path)
@@ -585,17 +691,6 @@ namespace CodexLocalDashboard
             catch { return false; }
         }
 
-        private static bool TryReadFileSuffix(string path, out int value)
-        {
-            value = 0;
-            var name = Path.GetFileNameWithoutExtension(path);
-            const string prefix = "usage-history-v";
-            if (!name.StartsWith(prefix,
-                StringComparison.OrdinalIgnoreCase)) return false;
-            return int.TryParse(name.Substring(prefix.Length),
-                NumberStyles.None, CultureInfo.InvariantCulture, out value);
-        }
-
         private void ThrowIfDisposed()
         {
             lock (gate)
@@ -606,7 +701,13 @@ namespace CodexLocalDashboard
 
         public void Dispose()
         {
-            lock (gate) disposed = true;
+            lock (gate)
+            {
+                if (disposed) return;
+                try { FlushPendingLocked(); }
+                catch { }
+                disposed = true;
+            }
         }
     }
 }

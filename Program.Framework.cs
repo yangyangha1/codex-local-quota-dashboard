@@ -144,7 +144,6 @@ namespace CodexLocalDashboard
             ShowInTaskbar = false;
             TopMost = true;
             DoubleBuffered = true;
-            KeyPreview = true;
             AutoScaleMode = AutoScaleMode.None;
             Font = new Font(Ui.FontFamilyName, 9f);
             taskbarOwner.ShowInTaskbar = false;
@@ -189,8 +188,6 @@ namespace CodexLocalDashboard
                 tips.SetToolTip(canvas, null);
             };
             MouseWheel += HandleChartWheel;
-            KeyPress += HandleHistoryDateKeyPress;
-            KeyDown += HandleHistoryDateKeyDown;
             ConfigureTray();
             renderThrottleTimer.Interval = 33;
             renderThrottleTimer.Tick += delegate
@@ -613,12 +610,6 @@ namespace CodexLocalDashboard
             switchModeItem = new ToolStripMenuItem("切换为 Codex 顶部横条");
             switchModeItem.Click += delegate { ToggleDisplayMode(); };
             menu.Items.Add(switchModeItem);
-            menu.Items.Add("History 历史数据…", null,
-                delegate
-                {
-                    SetHistoryMode(!historyMode);
-                    RenderLayeredSurface();
-                });
             darkThemeItem = new ToolStripMenuItem("深色");
             lightThemeItem = new ToolStripMenuItem("浅色");
             darkThemeItem.Click += delegate { ApplyTheme(ThemeMode.Dark); };
@@ -1243,8 +1234,13 @@ namespace CodexLocalDashboard
             historyPanelChart.SetLoading(true);
             RenderLayeredSurface();
             var selectedDate = historyPanelChart.SelectedDate;
-            var from = historyPanelChart.RequiredReadFrom;
-            var to = historyPanelChart.RequiredReadTo;
+            var visibleWeek = historyPanelChart.VisibleWeekStart;
+            var chartFrom = historyPanelChart.RequiredReadFrom;
+            var chartTo = historyPanelChart.RequiredReadTo;
+            var statusFrom = historyPanelChart.StatusReadFrom;
+            var statusTo = historyPanelChart.StatusReadTo;
+            var from = chartFrom < statusFrom ? chartFrom : statusFrom;
+            var to = chartTo > statusTo ? chartTo : statusTo;
             try
             {
                 var samples = await Task.Run(() => historyStore.ReadRange(
@@ -1252,9 +1248,15 @@ namespace CodexLocalDashboard
                 if (cancellation.IsCancellationRequested || IsDisposed ||
                     !historyMode ||
                     !ReferenceEquals(historyLoadCancellation, cancellation) ||
-                    historyPanelChart.SelectedDate != selectedDate)
+                    historyPanelChart.SelectedDate != selectedDate ||
+                    historyPanelChart.VisibleWeekStart != visibleWeek)
                     return;
-                historyPanelChart.SetSamples(samples, historyStore.FileSize);
+                historyPanelChart.SetAvailableDates(samples.Select(value =>
+                    value.At.ToLocalTime().Date));
+                historyPanelChart.SetSamples(samples.Where(value =>
+                    value.At >= chartFrom.ToUniversalTime() &&
+                    value.At < chartTo.ToUniversalTime()).ToList(),
+                    historyStore.FileSize);
             }
             catch (OperationCanceledException) { }
             catch (Exception)
@@ -1413,18 +1415,14 @@ namespace CodexLocalDashboard
                 case HistoryPanelClickResult.Close:
                     SetHistoryMode(false);
                     break;
-                case HistoryPanelClickResult.PreviousDay:
-                    LoadHistoryDate(historyPanelChart.SelectedDate.AddDays(-1));
+                case HistoryPanelClickResult.PreviousWeek:
+                    if (historyPanelChart.ShiftWeek(-1)) BeginLoadHistory();
                     break;
-                case HistoryPanelClickResult.NextDay:
-                    LoadHistoryDate(historyPanelChart.SelectedDate.AddDays(1));
+                case HistoryPanelClickResult.NextWeek:
+                    if (historyPanelChart.ShiftWeek(1)) BeginLoadHistory();
                     break;
-                case HistoryPanelClickResult.EditDate:
-                    historyPanelChart.BeginDateEdit();
-                    Activate();
-                    break;
-                case HistoryPanelClickResult.ConfirmRefresh:
-                    ConfirmOrRefreshHistory();
+                case HistoryPanelClickResult.SelectDate:
+                    LoadHistoryDate(historyPanelChart.ClickedDate);
                     break;
                 case HistoryPanelClickResult.OpenStorage:
                     OpenHistoryStorage();
@@ -1439,14 +1437,12 @@ namespace CodexLocalDashboard
             {
                 case HistoryPanelPointerHint.Close:
                     return "关闭历史数据";
-                case HistoryPanelPointerHint.PreviousDay:
-                    return "前一天";
-                case HistoryPanelPointerHint.EditDate:
-                    return "手动输入日期，按 Enter 确认";
-                case HistoryPanelPointerHint.NextDay:
-                    return "后一天";
-                case HistoryPanelPointerHint.ConfirmRefresh:
-                    return "确认输入日期，或刷新当前日期历史";
+                case HistoryPanelPointerHint.PreviousWeek:
+                    return "显示前 7 天数据状态";
+                case HistoryPanelPointerHint.SelectDate:
+                    return "显示当天历史数据";
+                case HistoryPanelPointerHint.NextWeek:
+                    return "显示后 7 天数据状态";
                 case HistoryPanelPointerHint.OpenStorage:
                     return "打开历史数据保存位置";
                 case HistoryPanelPointerHint.SelectRange:
@@ -1456,58 +1452,6 @@ namespace CodexLocalDashboard
             }
         }
 
-        private void HandleHistoryDateKeyPress(object sender,
-            KeyPressEventArgs e)
-        {
-            if (!historyMode || !historyPanelChart.IsEditingDate) return;
-            if (e.KeyChar == '\r')
-            {
-                ConfirmOrRefreshHistory();
-                e.Handled = true;
-                return;
-            }
-            if (historyPanelChart.HandleDateCharacter(e.KeyChar))
-            {
-                RenderLayeredSurface();
-                e.Handled = true;
-            }
-        }
-
-        private void ConfirmOrRefreshHistory()
-        {
-            if (!historyMode) return;
-            if (!historyPanelChart.IsEditingDate)
-            {
-                BeginLoadHistory();
-                return;
-            }
-            DateTime selected;
-            if (historyPanelChart.TryCommitDate(out selected))
-                LoadHistoryDate(selected);
-            else RenderLayeredSurface();
-        }
-
-        private void HandleHistoryDateKeyDown(object sender, KeyEventArgs e)
-        {
-            if (!historyMode || !historyPanelChart.IsEditingDate) return;
-            if (e.KeyCode == Keys.Escape)
-            {
-                historyPanelChart.CancelDateEdit();
-                RenderLayeredSurface();
-                e.SuppressKeyPress = true;
-                return;
-            }
-            if (e.Control && e.KeyCode == Keys.V)
-            {
-                try
-                {
-                    if (historyPanelChart.PasteDateText(Clipboard.GetText()))
-                        RenderLayeredSurface();
-                }
-                catch { }
-                e.SuppressKeyPress = true;
-            }
-        }
 
         private void OpenHistoryStorage()
         {
@@ -1654,8 +1598,6 @@ namespace CodexLocalDashboard
                         canvas.Cursor = panelHint ==
                             HistoryPanelPointerHint.SelectRange
                             ? Cursors.Cross
-                            : panelHint == HistoryPanelPointerHint.EditDate
-                                ? Cursors.IBeam
                             : panelHint != HistoryPanelPointerHint.None ||
                                 hint != ProjectDetailPointerHint.None
                                 ? Cursors.Hand : Cursors.Default;
