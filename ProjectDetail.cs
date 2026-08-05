@@ -444,19 +444,7 @@ namespace CodexLocalDashboard
                 new RectangleF(bounds.Left, bounds.Top + 15f * scale,
                     bounds.Width - 18f * scale, 14f * scale),
                 NearFormat);
-            using (var closePen = new Pen(muted,
-                Math.Max(0.8f, scale)))
-            {
-                closePen.StartCap = LineCap.Round;
-                closePen.EndCap = LineCap.Round;
-                var centerX = closeBounds.Left + closeBounds.Width / 2f;
-                var centerY = closeBounds.Top + closeBounds.Height / 2f;
-                var radius = 4f * scale;
-                graphics.DrawLine(closePen, centerX - radius,
-                    centerY - radius, centerX + radius, centerY + radius);
-                graphics.DrawLine(closePen, centerX + radius,
-                    centerY - radius, centerX - radius, centerY + radius);
-            }
+            Ui.DrawEmbeddedClose(graphics, closeBounds, muted, scale);
             graphics.DrawLine(gridPen, bounds.Left,
                 bounds.Top + 32f * scale, bounds.Right,
                 bounds.Top + 32f * scale);
@@ -507,17 +495,8 @@ namespace CodexLocalDashboard
                     actionBounds, FarFormat);
                 return RectangleF.Empty;
             }
-            using (var buttonPen = new Pen(Color.FromArgb(125, blue),
-                Math.Max(0.65f, 0.8f * scale)))
-            using (var buttonBrush = new SolidBrush(
-                Color.FromArgb(205, blue)))
-            {
-                graphics.DrawRectangle(buttonPen, actionBounds.X,
-                    actionBounds.Y, actionBounds.Width,
-                    actionBounds.Height);
-                graphics.DrawString("项目位置", smallFont, buttonBrush,
-                    actionBounds, CenterFormat);
-            }
+            Ui.DrawLocationAction(graphics, actionBounds, "项目位置",
+                smallFont, blue, scale, CenterFormat);
             return actionBounds;
         }
 
