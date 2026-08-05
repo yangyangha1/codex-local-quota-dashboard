@@ -1446,7 +1446,7 @@ namespace CodexLocalDashboard
                 case HistoryPanelPointerHint.OpenStorage:
                     return "打开历史数据保存位置";
                 case HistoryPanelPointerHint.SelectRange:
-                    return "左键框选放大；滚轮切换 1–48 小时并取消框选";
+                    return "左键框选、鼠标滚轮放大";
                 default:
                     return null;
             }

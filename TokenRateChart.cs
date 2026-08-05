@@ -909,7 +909,8 @@ namespace CodexLocalDashboard
                 tokenAxisMaximum,
                 cumulativeAxisMaximum, currentQuota, currentRate, peakRate,
                 cumulativeIncrease,
-                CalculateQuotaConsumption(selectedQuotaSource),
+                CalculateQuotaConsumption(selectedQuotaSource,
+                    historicalSource),
                 timelineStart, axisEnd,
                 displayDuration, historicalSource);
         }
@@ -1107,7 +1108,7 @@ namespace CodexLocalDashboard
         }
 
         private static double CalculateQuotaConsumption(
-            List<HistoryPoint> points)
+            List<HistoryPoint> points, bool carryAcrossHistoricalGaps)
         {
             if (points.Count < 2) return 0d;
             var total = 0d;
@@ -1115,8 +1116,16 @@ namespace CodexLocalDashboard
             for (var i = 1; i < points.Count; i++)
             {
                 var point = points[i];
-                if (point.BreakBefore)
+                if (point.BreakBefore && !carryAcrossHistoricalGaps)
                 {
+                    reference = point.Value;
+                    continue;
+                }
+                if (point.BreakBefore && point.Value > reference)
+                {
+                    // Historical files can be compacted or flushed in batches,
+                    // so a long gap is not by itself a quota reset. A rise at a
+                    // break still identifies a new quota window.
                     reference = point.Value;
                     continue;
                 }
@@ -1411,25 +1420,99 @@ namespace CodexLocalDashboard
         {
             var gap = Math.Max(2f, 3f * geometryScale);
             var usable = Math.Max(1f, bounds.Width - gap * 2f);
-            var leftWidth = usable * 0.38f;
-            var centerWidth = usable * 0.28f;
-            var rightWidth = usable - leftWidth - centerWidth;
-            using (var leftFormat = Format(StringAlignment.Near,
-                StringAlignment.Center))
-            using (var centerFormat = Format(StringAlignment.Center,
-                StringAlignment.Center))
-            using (var rightFormat = Format(StringAlignment.Far,
-                StringAlignment.Center))
+            var leftWidth = Math.Max(1f,
+                graphics.MeasureString(leftText, font).Width);
+            var centerWidth = Math.Max(1f,
+                graphics.MeasureString(centerText, font).Width);
+            var rightWidth = Math.Max(1f,
+                graphics.MeasureString(rightText, font).Width);
+            var requested = leftWidth + centerWidth + rightWidth;
+
+            if (requested <= usable)
             {
-                graphics.DrawString(leftText, font, leftBrush,
-                    new RectangleF(bounds.Left, bounds.Top, leftWidth,
-                        headerHeight), leftFormat);
-                graphics.DrawString(centerText, font, centerBrush,
-                    new RectangleF(bounds.Left + leftWidth + gap,
-                        bounds.Top, centerWidth, headerHeight), centerFormat);
-                graphics.DrawString(rightText, font, rightBrush,
-                    new RectangleF(bounds.Right - rightWidth, bounds.Top,
-                        rightWidth, headerHeight), rightFormat);
+                // Keep each label at its measured width and give the spare
+                // room to the center cell. The right-aligned cumulative value
+                // therefore grows with the value instead of being clipped by
+                // a fixed third of the chart.
+                centerWidth += usable - requested;
+            }
+            else
+            {
+                // Preserve the measured width of the cumulative value first;
+                // reclaim space from the two descriptive labels only when the
+                // three labels cannot fit. DrawHeaderText applies a small font
+                // fallback/ellipsis only as a final safety net for very large
+                // values or very small windows.
+                var minimum = Math.Max(18f, 24f * geometryScale);
+                var overflow = requested - usable;
+                var centerRoom = Math.Max(0f, centerWidth - minimum);
+                var take = Math.Min(centerRoom, overflow);
+                centerWidth -= take;
+                overflow -= take;
+                var leftRoom = Math.Max(0f, leftWidth - minimum);
+                take = Math.Min(leftRoom, overflow);
+                leftWidth -= take;
+                overflow -= take;
+                if (overflow > 0f)
+                    rightWidth = Math.Max(minimum,
+                        rightWidth - overflow);
+
+                var total = leftWidth + centerWidth + rightWidth;
+                if (total > usable)
+                    rightWidth = Math.Max(1f,
+                        usable - leftWidth - centerWidth);
+                if (leftWidth + centerWidth + rightWidth > usable)
+                {
+                    var leftAndCenter = Math.Max(1f,
+                        leftWidth + centerWidth);
+                    var factor = Math.Max(.05f,
+                        (usable - rightWidth) / leftAndCenter);
+                    leftWidth *= factor;
+                    centerWidth *= factor;
+                }
+            }
+
+            DrawHeaderText(graphics, leftText, font, leftBrush,
+                new RectangleF(bounds.Left, bounds.Top, leftWidth,
+                    headerHeight), StringAlignment.Near);
+            DrawHeaderText(graphics, centerText, font, centerBrush,
+                new RectangleF(bounds.Left + leftWidth + gap, bounds.Top,
+                    centerWidth, headerHeight), StringAlignment.Center);
+            DrawHeaderText(graphics, rightText, font, rightBrush,
+                new RectangleF(bounds.Right - rightWidth, bounds.Top,
+                    rightWidth, headerHeight), StringAlignment.Far);
+        }
+
+        private static void DrawHeaderText(Graphics graphics, string text,
+            Font baseFont, Brush brush, RectangleF bounds,
+            StringAlignment alignment)
+        {
+            if (bounds.Width <= 0f || string.IsNullOrEmpty(text)) return;
+            Font fitted = null;
+            try
+            {
+                var size = baseFont.Size;
+                while (size > 5.2f &&
+                    graphics.MeasureString(text,
+                        fitted ?? baseFont).Width > bounds.Width)
+                {
+                    size -= .35f;
+                    if (fitted != null) fitted.Dispose();
+                    fitted = new Font(baseFont.FontFamily, size,
+                        baseFont.Style, GraphicsUnit.Point);
+                }
+
+                using (var format = Format(alignment,
+                    StringAlignment.Center))
+                {
+                    format.Trimming = StringTrimming.EllipsisCharacter;
+                    graphics.DrawString(text, fitted ?? baseFont, brush,
+                        bounds, format);
+                }
+            }
+            finally
+            {
+                if (fitted != null) fitted.Dispose();
             }
         }
 

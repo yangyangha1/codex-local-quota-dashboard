@@ -37,6 +37,8 @@ namespace CodexLocalDashboard
                 ChartSupportsWheelAndBrushZoom();
                 Console.WriteLine("Running realtime replay test");
                 HistoricalReplayUsesRealtimeQuotaCalculation();
+                Console.WriteLine("Running sparse history quota test");
+                HistoricalReplayCarriesQuotaAcrossSparseGaps();
                 Console.WriteLine("Running seven-day status strip test");
                 SupportsSevenDayStatusStrip();
             }
@@ -330,9 +332,12 @@ namespace CodexLocalDashboard
             {
                 chart.Draw(graphics, new RectangleF(14, 14, 292, 239),
                     ThemeMode.Dark, 1f);
-                Equal(HistoryPanelClickResult.OpenStorage,
+                Equal(HistoryPanelClickResult.None,
                     chart.HandleClick(new PointF(246f, 24f)),
-                    "storage action is placed on the upper row");
+                    "history chart does not reserve a storage action area");
+                Equal(HistoryPanelClickResult.OpenStorage,
+                    chart.HandleClick(new PointF(17f, 17f)),
+                    "history title opens the storage directory");
                 var selectedBounds = chart.DayBounds(5);
                 Equal(HistoryPanelClickResult.SelectDate,
                     chart.HandleClick(new PointF(selectedBounds.Left + 2f,
@@ -415,6 +420,36 @@ namespace CodexLocalDashboard
                 "Historical").GetValue(snapshot);
             True(historical,
                 "history render state can hide the meaningless rate label");
+        }
+
+        private static void HistoricalReplayCarriesQuotaAcrossSparseGaps()
+        {
+            var panel = new HistoryPanelChart();
+            var day = new DateTime(2026, 8, 4);
+            panel.SetDate(day);
+            var from = new DateTimeOffset(day);
+            var reset = from.AddDays(7);
+            panel.SetSamples(new List<HistorySample>
+            {
+                new HistorySample(from.AddHours(19), 0, 0, 0, 0, true,
+                    1000, 100, 0, 0, 15d, 10080, reset),
+                new HistorySample(from.AddHours(19).AddMinutes(5), 0, 0,
+                    0, 0, false, 1100, 110, 0, 0, 15d, 10080, reset),
+                new HistorySample(from.AddHours(20).AddMinutes(30), 0, 0,
+                    0, 0, false, 1200, 120, 0, 0, 2d, 10080, reset)
+            }, 0);
+            var chart = typeof(HistoryPanelChart).GetField("chart",
+                BindingFlags.Instance | BindingFlags.NonPublic)
+                .GetValue(panel);
+            var method = chart.GetType().GetMethod(
+                "BuildRenderSnapshotLocked",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var snapshot = method.Invoke(chart,
+                new object[] { from.AddDays(1) });
+            var consumed = (double)snapshot.GetType().GetField(
+                "QuotaConsumedDuringRuntime").GetValue(snapshot);
+            True(consumed > 12.9d,
+                "historical quota consumption crosses sparse write gaps");
         }
 
         private static UsageSnapshot Snapshot(long input, long output,

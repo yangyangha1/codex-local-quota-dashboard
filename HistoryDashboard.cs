@@ -27,8 +27,9 @@ namespace CodexLocalDashboard
     }
 
     /// <summary>
-    /// History 只增加七日数据状态条与保存位置；曲线、坐标、滚轮档位和
-    /// 框选放大均直接复用 TokenRateChart。
+    /// History 只增加七日数据状态条；曲线、坐标、滚轮档位和框选放大
+    /// 均直接复用 TokenRateChart。标题文字本身是打开历史目录的入口，
+    /// 不增加额外按钮或改变标题样式。
     /// </summary>
     internal sealed class HistoryPanelChart
     {
@@ -40,9 +41,9 @@ namespace CodexLocalDashboard
         private DateTime weekStart = StartOfWeek(DateTime.Today);
         private DateTime clickedDate = DateTime.Today;
         private RectangleF closeBounds;
+        private RectangleF titleBounds;
         private RectangleF previousBounds;
         private RectangleF nextBounds;
-        private RectangleF storageBounds;
         private RectangleF chartBounds;
         private bool loading;
         private bool loadError;
@@ -148,9 +149,9 @@ namespace CodexLocalDashboard
             loading = false;
             loadError = false;
             closeBounds = RectangleF.Empty;
+            titleBounds = RectangleF.Empty;
             previousBounds = RectangleF.Empty;
             nextBounds = RectangleF.Empty;
-            storageBounds = RectangleF.Empty;
             chartBounds = RectangleF.Empty;
             for (var i = 0; i < dayBounds.Length; i++)
                 dayBounds[i] = RectangleF.Empty;
@@ -181,6 +182,8 @@ namespace CodexLocalDashboard
         public HistoryPanelPointerHint PointerHint(PointF point)
         {
             if (closeBounds.Contains(point)) return HistoryPanelPointerHint.Close;
+            if (titleBounds.Contains(point))
+                return HistoryPanelPointerHint.OpenStorage;
             if (previousBounds.Contains(point))
                 return HistoryPanelPointerHint.PreviousWeek;
             if (nextBounds.Contains(point) &&
@@ -190,8 +193,6 @@ namespace CodexLocalDashboard
                 if (dayBounds[i].Contains(point) &&
                     availableDates.Contains(weekStart.AddDays(i)))
                     return HistoryPanelPointerHint.SelectDate;
-            if (storageBounds.Contains(point))
-                return HistoryPanelPointerHint.OpenStorage;
             if (chart.PlotBounds.Contains(point))
                 return HistoryPanelPointerHint.SelectRange;
             return HistoryPanelPointerHint.None;
@@ -200,6 +201,8 @@ namespace CodexLocalDashboard
         public HistoryPanelClickResult HandleClick(PointF point)
         {
             if (closeBounds.Contains(point)) return HistoryPanelClickResult.Close;
+            if (titleBounds.Contains(point))
+                return HistoryPanelClickResult.OpenStorage;
             if (previousBounds.Contains(point))
                 return HistoryPanelClickResult.PreviousWeek;
             if (nextBounds.Contains(point) &&
@@ -213,8 +216,6 @@ namespace CodexLocalDashboard
                 clickedDate = date;
                 return HistoryPanelClickResult.SelectDate;
             }
-            if (storageBounds.Contains(point))
-                return HistoryPanelClickResult.OpenStorage;
             return HistoryPanelClickResult.None;
         }
 
@@ -238,26 +239,28 @@ namespace CodexLocalDashboard
 
             closeBounds = new RectangleF(bounds.Right - 23f * scale,
                 bounds.Top, 23f * scale, 20f * scale);
-            storageBounds = new RectangleF(bounds.Right - 92f * scale,
-                bounds.Top, 64f * scale, 20f * scale);
             previousBounds = new RectangleF(bounds.Left,
-                bounds.Top + 25f * scale, 22f * scale, 22f * scale);
+                bounds.Top + 23f * scale, 22f * scale, 20f * scale);
             nextBounds = new RectangleF(bounds.Right - 22f * scale,
-                bounds.Top + 25f * scale, 22f * scale, 22f * scale);
+                bounds.Top + 23f * scale, 22f * scale, 20f * scale);
             var daysLeft = previousBounds.Right + 4f * scale;
             var daysRight = nextBounds.Left - 4f * scale;
             var gap = 3f * scale;
             var width = (daysRight - daysLeft - gap * 6f) / 7f;
             for (var i = 0; i < dayBounds.Length; i++)
                 dayBounds[i] = new RectangleF(daysLeft + i * (width + gap),
-                    bounds.Top + 25f * scale, width, 22f * scale);
+                    bounds.Top + 23f * scale, width, 20f * scale);
             chartBounds = RectangleF.FromLTRB(bounds.Left,
-                bounds.Top + 56f * scale, bounds.Right, bounds.Bottom);
+                bounds.Top + 49f * scale, bounds.Right, bounds.Bottom);
 
             using (var titleFont = new Font(Ui.FontFamilyName,
                 Math.Max(5.8f, 7.6f * visualScale), FontStyle.Bold))
             using (var bodyFont = new Font(Ui.FontFamilyName,
                 Math.Max(5.6f, 7.1f * visualScale), FontStyle.Bold))
+            using (var dateFont = new Font(Ui.FontFamilyName,
+                Math.Max(6.2f, 8.1f * visualScale), FontStyle.Regular))
+            using (var dateAvailableFont = new Font(Ui.FontFamilyName,
+                Math.Max(6.2f, 8.1f * visualScale), FontStyle.Bold))
             using (var smallFont = new Font(Ui.FontFamilyName,
                 Math.Max(5.0f, 6.2f * visualScale)))
             using (var primaryBrush = new SolidBrush(primary))
@@ -271,11 +274,11 @@ namespace CodexLocalDashboard
                 Math.Max(1f, 1.2f * scale)))
             using (var center = CenterFormat())
             {
+                var titleSize = graphics.MeasureString("历史数据", titleFont);
+                titleBounds = new RectangleF(bounds.Left, bounds.Top,
+                    titleSize.Width + 2f * scale, 18f * scale);
                 graphics.DrawString("历史数据", titleFont, primaryBrush,
                     new PointF(bounds.Left, bounds.Top));
-                graphics.FillRectangle(surfaceBrush, storageBounds);
-                Ui.DrawLocationAction(graphics, storageBounds, "保存位置",
-                    smallFont, blue, scale, center);
                 Ui.DrawEmbeddedClose(graphics, closeBounds, muted, scale);
                 DrawBox(graphics, previousBounds, "‹", bodyFont,
                     primaryBrush, surfaceBrush, borderPen, center);
@@ -288,15 +291,14 @@ namespace CodexLocalDashboard
                 {
                     var date = weekStart.AddDays(i);
                     var available = availableDates.Contains(date);
-                    graphics.FillRectangle(available ? blueBrush :
-                        disabledBrush, dayBounds[i]);
-                    if (available && date == selectedDate)
+                    if (date == selectedDate)
                         graphics.DrawRectangle(bluePen, dayBounds[i].X - 1f,
                             dayBounds[i].Y - 1f, dayBounds[i].Width + 2f,
                             dayBounds[i].Height + 2f);
                     graphics.DrawString(date.ToString("M/d",
-                        CultureInfo.InvariantCulture), smallFont,
-                        available ? surfaceBrush : mutedBrush,
+                        CultureInfo.InvariantCulture),
+                        available ? dateAvailableFont : dateFont,
+                        available ? blueBrush : disabledBrush,
                         dayBounds[i], center);
                 }
 
@@ -338,7 +340,7 @@ namespace CodexLocalDashboard
             string text, Font font, Brush textBrush, Brush fillBrush,
             Pen borderPen, StringFormat format)
         {
-            graphics.FillRectangle(fillBrush, bounds);
+            if (fillBrush != null) graphics.FillRectangle(fillBrush, bounds);
             graphics.DrawRectangle(borderPen, bounds.X, bounds.Y,
                 bounds.Width, bounds.Height);
             graphics.DrawString(text, font, textBrush, bounds, format);
