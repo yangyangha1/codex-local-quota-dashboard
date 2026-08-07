@@ -65,7 +65,9 @@ namespace CodexLocalDashboard
                         startingTokens + minute * 138000L,
                         88d - minute * 25d / 119d, 10080, resetAt);
                 }
-                form.ApplyTheme(ThemeMode.Light);
+                var previewTheme = Array.IndexOf(args, "--dark") >= 0
+                    ? ThemeMode.Dark : ThemeMode.Light;
+                form.ApplyTheme(previewTheme);
                 form.ApplySnapshot(snapshot);
                 if (Array.IndexOf(args, "--rate") >= 0)
                     chart.ToggleMode();
@@ -89,6 +91,43 @@ namespace CodexLocalDashboard
                         "projectDetailChart", BindingFlags.Instance |
                             BindingFlags.NonPublic).GetValue(form))
                         .SetProjects(snapshot.Projects);
+                }
+                if (Array.IndexOf(args, "--history") >= 0)
+                {
+                    typeof(DashboardForm).GetField("historyMode",
+                        BindingFlags.Instance | BindingFlags.NonPublic)
+                        .SetValue(form, true);
+                    var history = (HistoryPanelChart)typeof(DashboardForm)
+                        .GetField("historyPanelChart",
+                            BindingFlags.Instance | BindingFlags.NonPublic)
+                        .GetValue(form);
+                    history.SetDate(DateTime.Today);
+                    history.SetAvailableDates(new[] { DateTime.Today,
+                        DateTime.Today.AddDays(-1),
+                        DateTime.Today.AddDays(-3) });
+                    var historySamples = new List<HistorySample>();
+                    var historyStart = new DateTimeOffset(DateTime.Today);
+                    for (var index = 0; index < 720; index++)
+                        historySamples.Add(new HistorySample(
+                            historyStart.AddSeconds(index * 30),
+                            160, 45, 80, 12, index == 0,
+                            18000 + index * 160L,
+                            6200 + index * 45L,
+                            5100 + index * 80L,
+                            900 + index * 12L,
+                            88d - index * 25d / 719d,
+                            10080, resetAt,
+                            4840d + index * 41d));
+                    history.SetSamples(historySamples, 184320);
+                    if (Array.IndexOf(args, "--history-loading") >= 0)
+                        history.SetLoading(true);
+                }
+                if (Array.IndexOf(args, "--dashboard-150") >= 0)
+                {
+                    form.ClientSize = new Size(384, 417);
+                    typeof(DashboardForm).GetMethod("ScaleCanvas",
+                        BindingFlags.Instance | BindingFlags.NonPublic)
+                        .Invoke(form, null);
                 }
                 if (Array.IndexOf(args, "--detail-many") >= 0)
                 {
@@ -129,9 +168,32 @@ namespace CodexLocalDashboard
                     Application.Run(form);
                     return 0;
                 }
+                if (Array.IndexOf(args, "--strip-2k") >= 0)
+                {
+                    const float previewDpiScale = 1.5f;
+                    using (var highDpiStrip = new Bitmap(1050, 42,
+                        PixelFormat.Format32bppPArgb))
+                    using (var highDpiPanel = new QuotaStripPanel
+                    {
+                        ClientSize = new Size(1050, 42),
+                        DpiScale = previewDpiScale,
+                        Theme = previewTheme,
+                        Snapshot = snapshot
+                    })
+                    using (var stripGraphics =
+                        Graphics.FromImage(highDpiStrip))
+                    {
+                        stripGraphics.Clear(previewTheme == ThemeMode.Light
+                            ? Color.FromArgb(230, 244, 244, 242)
+                            : Color.FromArgb(230, 20, 20, 20));
+                        highDpiPanel.DrawLayered(stripGraphics);
+                        highDpiStrip.Save(args[0], ImageFormat.Png);
+                    }
+                    return 0;
+                }
                 using (var dashboard = form.CreateLayeredSurfacePreview())
                 using (var strip = new Bitmap(700, 28, PixelFormat.Format32bppPArgb))
-                using (var stripPanel = new QuotaStripPanel { ClientSize = new Size(700, 28), DpiScale = 1f, Theme = ThemeMode.Light, Snapshot = snapshot })
+                using (var stripPanel = new QuotaStripPanel { ClientSize = new Size(700, 28), DpiScale = 1f, Theme = previewTheme, Snapshot = snapshot })
                 using (var graphics = Graphics.FromImage(output))
                 {
                     if (Array.IndexOf(args, "--dashboard-only") >= 0)
