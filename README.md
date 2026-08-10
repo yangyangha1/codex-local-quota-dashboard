@@ -4,9 +4,58 @@
   <img src="dashboard-icon-master.png" width="112" alt="Codex Local Quota Dashboard icon">
 </p>
 
-一个面向 Windows 的 Codex 额度与 Token 用量仪表盘。下载 EXE 后直接运行，程序会自动读取本机 `.codex` 会话日志，显示最近缓存的额度、重置时间和本地 Token 统计；无需填写账号、API Key 或进行任何配置。
+一个面向 Windows 的 Codex 额度与 Token 用量仪表盘，并提供同一功能逻辑的原生 macOS 悬浮面板。两版都只读取本机 Codex 日志：不需要账号、API Key 或网络访问，也不会上传提示词、会话内容或用量数据。
 
-**核心特点：只读取本地日志，完全不联网。** 程序不会调用 OpenAI 或其他在线额度接口，也不会上传提示词、会话内容或用量数据。
+> [!NOTE]
+> macOS 原生实现位于 [`macOS/`](macOS/README.md)。它是独立、可移动和可缩放的桌面悬浮面板；原 Windows 的 Codex 顶部横条/窗口贴附模式不会在 macOS 上出现。
+
+## 快速使用
+
+### Windows
+
+1. 获取 `CodexLocalDashboard-v1.5.5.exe`。
+2. 双击运行，程序会自动扫描 `%USERPROFILE%\\.codex\\sessions` 和 `archived_sessions`，无需安装和登录。
+3. 仪表盘会显示最近的本地额度快照，以及今日、近 7 天和近 30 天 Token 用量。
+4. 左键点击托盘图标可直接显示缓存快照仪表盘；在仪表盘任意位置点击右键，可调整主题、透明度、置顶和隐藏。
+
+### macOS 14 或更新版本
+
+1. 在 [v1.5.5 Release](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/tag/v1.5.5) 下载 `CodexQuotaWidget-macOS-v1.5.5.zip`。
+2. 解压后将 `CodexQuotaWidget.app` 拖入“应用程序”文件夹，或保留在任意本地目录后双击运行。
+3. 当前公开包**没有 Apple Developer ID 签名或公证**。首次启动被系统拦截时，在 Finder 中按住 Control 点击 App，选择“打开”并在确认框中再次选择“打开”；也可前往“系统设置 → 隐私与安全性”选择“仍要打开”。
+4. 菜单栏额度图标左键可查看当前额度摘要，右键可设置主题、透明度、置顶、隐藏与开机自动启动。实时页面除“历史／明细”按钮外的任意位置均可拖动面板；只有历史图表支持框选放大。
+
+如 macOS 仍因下载隔离而拒绝打开，请先确认 Release 页面中的 SHA-256 与下载包一致，再执行：
+
+```zsh
+xattr -dr com.apple.quarantine /Applications/CodexQuotaWidget.app
+```
+
+macOS 下载包只包含可执行的 `.app`，不包含源码、安装器、系统小组件扩展或顶部横条功能。更完整的说明见 [`macOS/README.md`](macOS/README.md)。
+
+## 从源码构建 macOS 版
+
+需要 macOS 14 或更新版本，以及 Apple Command Line Tools。无需 .NET。
+
+```zsh
+cd macOS
+./scripts/build-app.sh
+open CodexQuotaWidget.app
+```
+
+构建脚本会生成同时支持 Apple Silicon 和 Intel Mac 的通用 `.app`。发布 ZIP 可由下列脚本生成：
+
+```zsh
+cd macOS
+./scripts/package-release.sh
+```
+
+运行本地回归检查：
+
+```zsh
+cd macOS
+./scripts/run-regression-tests.sh
+```
 
 ## 界面预览
 
@@ -16,42 +65,21 @@
   <img src="docs/images/dashboard.jpg" width="520" alt="Codex Local Quota Dashboard desktop dashboard">
 </p>
 
-**Codex 顶部横条**
+**Codex 顶部横条（仅 Windows）**
 
 <p align="center">
   <img src="docs/images/top-strip.jpg" alt="Codex Local Quota Dashboard top strip attached to Codex">
 </p>
 
-## 快速使用
-
-1. 获取 `CodexLocalQuotaDashboard-v1.5.0.exe`。
-2. 双击运行，程序会自动扫描 `%USERPROFILE%\.codex\sessions` 和 `archived_sessions`，无需安装和登录。
-3. 仪表盘会显示最近的本地额度快照，以及今日、近 7 天和近 30 天 Token 用量。
-4. 左键点击托盘图标可直接显示缓存快照仪表盘；在仪表盘任意位置点击右键，可切换顶部横条、调整背景透明度或设置开机启动。
-5. 拖动仪表盘内容可移动窗口；拖动边缘或四角可整体缩放。
-6. 实时折线图底部显示时间刻度；鼠标位于图表上时滚动滚轮，可在 1h、2h、3h、6h、12h、24h 和 48h 时间轴之间切换，默认 2h。点击 `Detail` 可在图表区域查看本机各项目与 session 的 Token 用量，再次点击或按明细右上角 `×` 返回图表。
-7. 点击顶部 `History` 可像 `Detail` 一样在主界面图表区域切换到历史模式，再次点击或按历史视图右上角 `×` 返回实时图表。点击日期横条上方的“历史数据”标题可打开历史文件目录，标题样式保持不变。日期区按 7 天显示状态：蓝色粗体日期有数据且可直接点击，灰色日期无数据且不可选，当前日期用蓝色边框标识，左右箭头每次切换 7 天。图表复用实时图表的颜色、曲线、坐标与 1h／2h／3h／6h／12h／24h／48h 滚轮档位。左键框选可局部放大，鼠标滚轮放大并自动取消框选；48h 会自动读取前一天数据。
-
 ## 功能特点
 
-- **完全本地读取**：扫描 `%USERPROFILE%\.codex\sessions` 和 `archived_sessions`。
-- **额度快照**：显示本地日志中最近记录的额度剩余百分比和重置时间。
-- **额度颜色提示**：进度条按剩余额度在绿、黄绿、琥珀、橙、橙红和红色之间连续渐变。
-- **用量统计**：汇总今日、近 7 天和近 30 天的 Token 总量。
-- **实时内存时间轴**：两种实时折线图都在后台持续取点，支持滚轮切换 1h～48h。
-- **本地历史数据**：软件启动并成功扫描后，每 30 秒缓冲一个包含四类源计数和额度快照的完整数据点，每 5 分钟将这一批数据一次性追加到磁盘；不会把 10 个采样点合并成一个点，也不保存提示词、回复、会话名称、项目路径或 7 天／30 天快照。
-- **按需历史读取**：只有进入 `History` 模式才读取历史文件，退出或切换到 `Detail` 后立即取消读取；读取使用独立只读句柄，不阻塞常驻写入。
-- **兼容单文件与空间上限**：新记录写入 `%LOCALAPPDATA%\CodexLocalDashboard\codex-usage-history-fromYYYYMMDD-v1.5.0.bin`，日期为记录首日；格式兼容时继续增量追加，格式不兼容时才保留旧文件并创建带序号的新文件。原有 `usage-history-v3.bin` 仍可读取。记录继续使用兼容的 96 字节结构；文件超过 8 MB 后自动低频分级压缩，不生成每日零散日志。
-- **项目明细**：点击 `Detail` 后才在后台读取本地项目、会话、模型、Token 构成和工具调用等明细；关闭后清空明细对象并释放工作集，普通图表模式不常驻这些数据。
-- **桌面仪表盘**：无标题栏的紧凑窗口，支持拖动、四边缩放和整体等比缩放。
-- **Codex 顶部横条**：自动贴附到 Codex 窗口顶部，并保持在 Codex 内容区域前层。
-- **背景透明度调节**：仪表盘和顶部横条共用 0～100 的背景透明度，默认 10（背景 90% 不透明），文字与进度信息保持完全不透明。
-- **三种外观**：深色、浅色和透明配色可在仪表盘与顶部横条之间同步切换。
-- **托盘常驻**：支持托盘菜单、窗口置顶、隐藏和开机启动。
-- **快捷唤醒**：左键点击托盘图标可直接显示缓存快照仪表盘，仪表盘不占用 Windows 任务栏。
-- **高 DPI 支持**：针对 Windows 缩放和小尺寸托盘图标进行优化。
-- **低资源占用**：分块扫描大型 JSONL 日志，按需重绘顶部横条，并在刷新后释放空闲工作页。
-- **多实例运行**：允许同时启动多个相互独立的仪表盘实例。
+- **完全本地读取**：扫描本机 `.codex/sessions` 和 `archived_sessions`；不会联网或上传数据。
+- **额度快照**：显示本地日志中最近记录的额度剩余百分比和重置时间；该值不是服务端实时查询结果。
+- **用量统计和图表**：汇总今日、近 7 天、近 30 天 Token；保留实时额度、速率和累计 Token 图表及 1h～48h 时间轴。
+- **本地历史数据**：每 30 秒缓冲一个隐私最小化的数据点，每 5 分钟批量写入；兼容 96 字节历史格式并在超过 8 MB 后分级压缩。
+- **按需项目明细**：仅在打开明细时读取项目、会话、模型、Token 构成和工具调用；普通界面不常驻这些对象。
+- **原生 macOS 悬浮面板**：无标题、可拖动、等比缩放、可置顶；历史页面可框选时间段放大。它不含系统 WidgetKit 扩展，也不贴附 Codex 窗口。
+- **Windows 桌面仪表盘**：无标题栏、支持拖动、四边缩放、托盘常驻与可选顶部横条。
 
 ## 隐私与数据来源
 
@@ -62,11 +90,11 @@
 
 ## 系统要求
 
-- Windows 10 或 Windows 11
-- .NET Framework 4.8
+- Windows 10 或 Windows 11：.NET Framework 4.8
+- macOS 14 或更新版本：下载版无需开发工具；从源码构建需要 Apple Command Line Tools
 - 已使用过 Codex，并存在本地 `.codex` 会话日志
 
-## 从源码编译
+## 从源码编译 Windows 版
 
 使用 Visual Studio 2022 或已安装 .NET Framework 4.8 SDK 的命令行环境：
 
@@ -77,7 +105,7 @@ msbuild CodexLocalDashboard.csproj /p:Configuration=Release
 也可以直接使用 .NET Framework C# 编译器：
 
 ```powershell
-& "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" `
+& "$env:WINDIR\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe" `
   /nologo /target:winexe /optimize+ /win32icon:dashboard.ico `
   /out:CodexLocalDashboard.exe `
   /reference:System.dll /reference:System.Core.dll `
@@ -91,12 +119,7 @@ msbuild CodexLocalDashboard.csproj /p:Configuration=Release
 
 - 无法在离线状态下得知服务端实时剩余额度，只能展示最近的本地缓存快照。
 - 本地统计取决于 Codex 日志格式；如果未来日志结构发生变化，可能需要更新解析规则。
-- 顶部横条模式依赖 Windows 上可识别的 Codex 桌面窗口。
-
-## 项目名称
-
-中文：**Codex 额度仪表盘 - 本地识别**  
-英文：**Codex Local Quota Dashboard**
+- macOS 发布包未经 Apple Developer ID 签名或公证；首次运行需按上述方式在系统安全提示中确认。
 
 ## License
 
