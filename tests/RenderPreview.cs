@@ -129,6 +129,13 @@ namespace CodexLocalDashboard
                         BindingFlags.Instance | BindingFlags.NonPublic)
                         .Invoke(form, null);
                 }
+                if (Array.IndexOf(args, "--dashboard-min") >= 0)
+                {
+                    form.ClientSize = new Size(256, 278);
+                    typeof(DashboardForm).GetMethod("ScaleCanvas",
+                        BindingFlags.Instance | BindingFlags.NonPublic)
+                        .Invoke(form, null);
+                }
                 if (Array.IndexOf(args, "--detail-many") >= 0)
                 {
                     var detailChart = (ProjectDetailChart)

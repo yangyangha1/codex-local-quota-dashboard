@@ -20,8 +20,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.5.1.0")]
-[assembly: AssemblyFileVersion("1.5.1.0")]
+[assembly: AssemblyVersion("1.5.5.0")]
+[assembly: AssemblyFileVersion("1.5.5.0")]
 
 namespace CodexLocalDashboard
 {
@@ -50,14 +50,6 @@ namespace CodexLocalDashboard
     {
         private const int DesignWidth = 320;
         private const int DesignHeight = 347;
-        private const string ProjectUrl =
-            "https://github.com/yangyangha1/codex-local-quota-dashboard";
-        private static readonly Version ApplicationVersion =
-            Assembly.GetExecutingAssembly().GetName().Version;
-        private static readonly string DisplayVersion = string.Format(
-            CultureInfo.InvariantCulture, "v{0}.{1}.{2}",
-            ApplicationVersion.Major, ApplicationVersion.Minor,
-            ApplicationVersion.Build);
         private readonly UsageScanner scanner = new UsageScanner();
         private readonly HistoryStore historyStore = new HistoryStore();
         private readonly TokenRateChart tokenRateChart = new TokenRateChart();
@@ -77,9 +69,8 @@ namespace CodexLocalDashboard
         private readonly StripBackdropForm stripBackdrop = new StripBackdropForm();
         private readonly Form taskbarOwner = new Form();
         private readonly Dictionary<Control, LayoutSpec> layout = new Dictionary<Control, LayoutSpec>();
-        private readonly Label quotaTitle = Ui.Label("最近限额快照", 9, FontStyle.Bold, Color.FromArgb(142, 153, 169));
-        private readonly Label versionLabel = Ui.Label(DisplayVersion, 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
-        private readonly Label quotaValue = Ui.Label("读取中…", 17, FontStyle.Bold, Color.White);
+        private readonly Label quotaTitle = Ui.Label(string.Empty, 9, FontStyle.Bold, Color.FromArgb(142, 153, 169));
+        private readonly Label quotaValue = Ui.Label("读取中…", 15, FontStyle.Bold, Color.White);
         private readonly Label quotaSub = Ui.Label("正在扫描本地日志", 8, FontStyle.Bold, Color.FromArgb(142, 153, 169));
         private readonly Label todayValue = Ui.Metric("—");
         private readonly Label weekValue = Ui.Metric("—");
@@ -168,18 +159,17 @@ namespace CodexLocalDashboard
             Controls.Add(stripPanel);
 
             Add(quotaTitle, 14, 3, 132, 18);
-            Add(versionLabel, 149, 3, 42, 18);
-            Add(quotaValue, 12, 20, 296, 38);
-            Add(quotaBar, 14, 60, 292, 6);
-            Add(quotaSub, 14, 68, 292, 18);
-            AddSeparator(14, 93, 292);
+            // Reserve enough horizontal room for the full remaining-quota
+            // text at every supported dashboard scale.
+            Add(quotaValue, 12, 3, 178, 38);
+            Add(quotaBar, 14, 43, 292, 6);
+            Add(quotaSub, 14, 51, 292, 18);
+            AddSeparator(14, 72, 292);
 
-            AddMetric("今日", todayValue, 14);
-            AddMetric("近 7 天", weekValue, 113);
-            AddMetric("近 30 天", monthValue, 212);
+            AddMetric("今日", todayValue, 14, 79);
+            AddMetric("近 7 天", weekValue, 113, 79);
+            AddMetric("近 30 天", monthValue, 212, 79);
 
-            versionLabel.Cursor = Cursors.Hand;
-            versionLabel.Click += delegate { OpenProjectUrl(); };
             CaptureLayout();
             AttachDrag(canvas);
             canvas.MouseLeave += delegate
@@ -276,11 +266,11 @@ namespace CodexLocalDashboard
             Add(line, x, y, width, 1);
         }
 
-        private void AddMetric(string caption, Label value, int x)
+        private void AddMetric(string caption, Label value, int x, int top)
         {
             var label = Ui.Label(caption, 8, FontStyle.Bold, Color.FromArgb(126, 137, 153));
-            Add(label, x, 102, 94, 18);
-            Add(value, x, 120, 94, 32);
+            Add(label, x, top, 94, 18);
+            Add(value, x, top + 18, 94, 32);
         }
 
         private void CaptureLayout()
@@ -326,7 +316,7 @@ namespace CodexLocalDashboard
 
         private void AttachDrag(Control parent)
         {
-            if (!(parent is Button) && !ReferenceEquals(parent, versionLabel)) { parent.MouseDown += BeginDrag; parent.MouseMove += ContinueDrag; parent.MouseUp += EndDrag; }
+            if (!(parent is Button)) { parent.MouseDown += BeginDrag; parent.MouseMove += ContinueDrag; parent.MouseUp += EndDrag; }
             parent.MouseWheel += HandleChartWheel;
             foreach (Control child in parent.Controls) AttachDrag(child);
         }
@@ -582,15 +572,15 @@ namespace CodexLocalDashboard
                 q == null ? (DateTimeOffset?)null : q.ResetsAt);
             if (q == null)
             {
-                quotaTitle.Text = "最近限额快照"; quotaValue.Text = "暂无缓存";
+                quotaTitle.Text = string.Empty; quotaValue.Text = "GPT·剩余暂无";
                 quotaSub.Text = "等待 Codex 写入限额信息"; quotaBar.Value = 0;
                 tips.SetToolTip(quotaTitle, string.Empty);
                 RenderLayeredSurface();
                 return;
             }
-            quotaTitle.Text = Ui.WindowName(q.WindowMinutes) + " · 缓存快照";
+            quotaTitle.Text = string.Empty;
             var remaining = Math.Max(0, 100 - q.UsedPercent);
-            quotaValue.Text = string.Format("剩余 {0:0.#}%", remaining);
+            quotaValue.Text = string.Format("GPT·剩余{0:0.#}%", remaining);
             quotaBar.Value = Math.Max(0, Math.Min(100, (int)Math.Round(remaining)));
             quotaBar.FillColor = Ui.QuotaColor(remaining);
             var reset = q.ResetsAt.HasValue ? q.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm") : "未知";
@@ -601,7 +591,7 @@ namespace CodexLocalDashboard
 
         private void ConfigureTray()
         {
-            tray.Text = "Codex 本地用量 " + DisplayVersion;
+            tray.Text = "Codex 本地用量";
             trayIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             tray.Icon = trayIcon ?? SystemIcons.Application;
             tray.Visible = true;
@@ -896,7 +886,7 @@ namespace CodexLocalDashboard
                 LayoutSpec original;
                 if ((detailMode || historyMode) &&
                     layout.TryGetValue(control, out original) &&
-                    original.Bounds.Top >= 102)
+                    original.Bounds.Top >= 79)
                     continue;
                 var bounds = new Rectangle(canvas.Left + control.Left, canvas.Top + control.Top, control.Width, control.Height);
                 var label = control as SmoothLabel;
@@ -924,6 +914,7 @@ namespace CodexLocalDashboard
             var detailBounds = DetailButtonBounds();
             var historyBounds = HistoryButtonBounds();
             var light = CurrentTheme == ThemeMode.Light;
+            var chartScale = canvas.Width / (float)DesignWidth;
             using (var border = new Pen(light
                 ? Color.FromArgb(88, 130, 162)
                 : Color.FromArgb(104, 162, 201)))
@@ -941,34 +932,40 @@ namespace CodexLocalDashboard
                 LineAlignment = StringAlignment.Center
             })
             {
+                var buttonRadius = Math.Max(2f, 3f * chartScale);
                 if (historyMode)
-                    graphics.FillRectangle(activeBrush, historyBounds);
-                graphics.DrawRectangle(border, historyBounds.X,
-                    historyBounds.Y, historyBounds.Width - 1,
-                    historyBounds.Height - 1);
+                    Ui.FillRoundedRectangle(graphics, activeBrush,
+                        historyBounds, buttonRadius);
+                Ui.DrawRoundedRectangle(graphics, border,
+                    new RectangleF(historyBounds.X, historyBounds.Y,
+                        Math.Max(1f, historyBounds.Width - 1),
+                        Math.Max(1f, historyBounds.Height - 1)),
+                    buttonRadius);
                 graphics.DrawString("历史", font, textBrush,
                     historyBounds, format);
                 if (detailMode)
-                    graphics.FillRectangle(activeBrush, detailBounds);
-                graphics.DrawRectangle(border, detailBounds.X,
-                    detailBounds.Y, detailBounds.Width - 1,
-                    detailBounds.Height - 1);
+                    Ui.FillRoundedRectangle(graphics, activeBrush,
+                        detailBounds, buttonRadius);
+                Ui.DrawRoundedRectangle(graphics, border,
+                    new RectangleF(detailBounds.X, detailBounds.Y,
+                        Math.Max(1f, detailBounds.Width - 1),
+                        Math.Max(1f, detailBounds.Height - 1)),
+                    buttonRadius);
                 graphics.DrawString("明细", font, textBrush,
                     detailBounds, format);
             }
 
-            // Real-time, History and Detail share the same chart region.
+            // Real-time, History and Detail share the same lower chart edge.
             // Background capture and five-minute history writes continue while
             // either embedded view is visible.
-            var chartScale = canvas.Width / (float)DesignWidth;
             var chartVisualScale = Math.Max(.75f, chartScale / Math.Max(1f, dpiScale));
             if (detailMode)
             {
                 var detailViewBounds = new RectangleF(
                     canvas.Left + 14f * chartScale,
-                    canvas.Top + 100f * chartScale,
+                    canvas.Top + 79f * chartScale,
                     292f * chartScale,
-                    239f * chartScale);
+                    260f * chartScale);
                 projectDetailChart.Draw(graphics, detailViewBounds,
                     CurrentTheme,
                     chartVisualScale);
@@ -977,9 +974,9 @@ namespace CodexLocalDashboard
             {
                 var historyViewBounds = new RectangleF(
                     canvas.Left + 14f * chartScale,
-                    canvas.Top + 100f * chartScale,
+                    canvas.Top + 84f * chartScale,
                     292f * chartScale,
-                    239f * chartScale);
+                    255f * chartScale);
                 historyPanelChart.Draw(graphics, historyViewBounds,
                     CurrentTheme, chartVisualScale);
             }
@@ -987,9 +984,9 @@ namespace CodexLocalDashboard
             {
                 var chartBounds = new RectangleF(
                     canvas.Left + 14f * chartScale,
-                    canvas.Top + 156f * chartScale,
+                    canvas.Top + 133f * chartScale,
                     292f * chartScale,
-                    183f * chartScale);
+                    206f * chartScale);
                 tokenRateChart.Draw(graphics, chartBounds, CurrentTheme,
                     DateTimeOffset.Now, chartVisualScale, true);
             }
@@ -1167,11 +1164,14 @@ namespace CodexLocalDashboard
         {
             if (stripMode || canvas.Width <= 0) return false;
             var scale = canvas.Width / (float)DesignWidth;
-            return detailMode || historyMode
-                ? new RectangleF(14f * scale, 100f * scale,
-                    292f * scale, 239f * scale).Contains(point)
-                : new RectangleF(14f * scale, 156f * scale,
-                    292f * scale, 183f * scale).Contains(point);
+            if (detailMode)
+                return new RectangleF(14f * scale, 79f * scale,
+                    292f * scale, 260f * scale).Contains(point);
+            if (historyMode)
+                return new RectangleF(14f * scale, 84f * scale,
+                    292f * scale, 255f * scale).Contains(point);
+            return new RectangleF(14f * scale, 133f * scale,
+                292f * scale, 206f * scale).Contains(point);
         }
 
         private void SetDetailMode(bool value)
@@ -1195,7 +1195,7 @@ namespace CodexLocalDashboard
             {
                 LayoutSpec original;
                 if (layout.TryGetValue(control, out original) &&
-                    original.Bounds.Top >= 102)
+                    original.Bounds.Top >= 79)
                     control.Visible = !(detailMode || historyMode);
             }
         }
@@ -1224,7 +1224,7 @@ namespace CodexLocalDashboard
             {
                 LayoutSpec original;
                 if (layout.TryGetValue(control, out original) &&
-                    original.Bounds.Top >= 102)
+                    original.Bounds.Top >= 79)
                     control.Visible = !(detailMode || historyMode);
             }
         }
@@ -1376,25 +1376,12 @@ namespace CodexLocalDashboard
             });
         }
 
-        private static void OpenProjectUrl()
-        {
-            try
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = ProjectUrl,
-                    UseShellExecute = true
-                });
-            }
-            catch { }
-        }
-
         private Rectangle DetailButtonBounds()
         {
             var scale = canvas.Width / (float)DesignWidth;
             return Rectangle.Round(new RectangleF(
                 canvas.Left + 249f * scale,
-                canvas.Top + 4f * scale,
+                canvas.Top + 13f * scale,
                 57f * scale,
                 18f * scale));
         }
@@ -1403,7 +1390,7 @@ namespace CodexLocalDashboard
         {
             if (stripMode || canvas.Width <= 0) return false;
             var scale = canvas.Width / (float)DesignWidth;
-            return new RectangleF(249f * scale, 4f * scale,
+            return new RectangleF(249f * scale, 13f * scale,
                 57f * scale, 18f * scale).Contains(point);
         }
 
@@ -1412,7 +1399,7 @@ namespace CodexLocalDashboard
             var scale = canvas.Width / (float)DesignWidth;
             return Rectangle.Round(new RectangleF(
                 canvas.Left + 194f * scale,
-                canvas.Top + 4f * scale,
+                canvas.Top + 13f * scale,
                 50f * scale,
                 18f * scale));
         }
@@ -1421,7 +1408,7 @@ namespace CodexLocalDashboard
         {
             if (stripMode || canvas.Width <= 0) return false;
             var scale = canvas.Width / (float)DesignWidth;
-            return new RectangleF(194f * scale, 4f * scale,
+            return new RectangleF(194f * scale, 13f * scale,
                 50f * scale, 18f * scale).Contains(point);
         }
 
@@ -1996,6 +1983,40 @@ namespace CodexLocalDashboard
                     x - radius, y + radius);
             }
         }
+        public static void FillRoundedRectangle(Graphics graphics,
+            Brush brush, RectangleF bounds, float radius)
+        {
+            using (var path = CreateRoundedPath(bounds, radius))
+                graphics.FillPath(brush, path);
+        }
+        public static void DrawRoundedRectangle(Graphics graphics, Pen pen,
+            RectangleF bounds, float radius)
+        {
+            using (var path = CreateRoundedPath(bounds, radius))
+                graphics.DrawPath(pen, path);
+        }
+        private static System.Drawing.Drawing2D.GraphicsPath CreateRoundedPath(
+            RectangleF bounds, float radius)
+        {
+            var path = new System.Drawing.Drawing2D.GraphicsPath();
+            var diameter = Math.Min(Math.Max(0f, radius * 2f),
+                Math.Min(bounds.Width, bounds.Height));
+            if (diameter < 2f)
+            {
+                path.AddRectangle(bounds);
+                return path;
+            }
+            path.StartFigure();
+            path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Top, diameter,
+                diameter, 270, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter,
+                diameter, diameter, 0, 90);
+            path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter,
+                diameter, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
         public static void DrawLocationAction(Graphics graphics,
             RectangleF bounds, string text, Font font, Color color,
             float scale, StringFormat format)
@@ -2004,8 +2025,8 @@ namespace CodexLocalDashboard
                 Math.Max(.65f, .8f * scale)))
             using (var brush = new SolidBrush(Color.FromArgb(205, color)))
             {
-                graphics.DrawRectangle(pen, bounds.X, bounds.Y,
-                    bounds.Width, bounds.Height);
+                DrawRoundedRectangle(graphics, pen, bounds,
+                    Math.Max(2f, 3f * scale));
                 graphics.DrawString(text, font, brush, bounds, format);
             }
         }

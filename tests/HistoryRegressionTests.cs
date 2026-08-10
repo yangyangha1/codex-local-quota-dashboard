@@ -336,7 +336,7 @@ namespace CodexLocalDashboard
                     chart.HandleClick(new PointF(246f, 24f)),
                     "history chart does not reserve a storage action area");
                 Equal(HistoryPanelClickResult.OpenStorage,
-                    chart.HandleClick(new PointF(17f, 17f)),
+                    chart.HandleClick(new PointF(160f, 24f)),
                     "history title opens the storage directory");
                 var selectedBounds = chart.DayBounds(5);
                 Equal(HistoryPanelClickResult.SelectDate,

@@ -237,30 +237,32 @@ namespace CodexLocalDashboard
                 Color.FromArgb(72, 88, 101);
             var scale = Math.Max(.65f, bounds.Width / 292f);
 
-            closeBounds = new RectangleF(bounds.Right - 23f * scale,
-                bounds.Top, 23f * scale, 20f * scale);
+            closeBounds = new RectangleF(bounds.Right - 18f * scale,
+                bounds.Top, 18f * scale, 20f * scale);
             previousBounds = new RectangleF(bounds.Left,
-                bounds.Top + 23f * scale, 22f * scale, 20f * scale);
-            nextBounds = new RectangleF(bounds.Right - 22f * scale,
-                bounds.Top + 23f * scale, 22f * scale, 20f * scale);
-            var daysLeft = previousBounds.Right + 4f * scale;
-            var daysRight = nextBounds.Left - 4f * scale;
-            var gap = 3f * scale;
+                bounds.Top, 26f * scale, 20f * scale);
+            nextBounds = new RectangleF(bounds.Right - 48f * scale,
+                bounds.Top, 26f * scale, 20f * scale);
+            var daysLeft = bounds.Left;
+            var daysRight = bounds.Right;
+            var gap = 2f * scale;
             var width = (daysRight - daysLeft - gap * 6f) / 7f;
             for (var i = 0; i < dayBounds.Length; i++)
                 dayBounds[i] = new RectangleF(daysLeft + i * (width + gap),
-                    bounds.Top + 23f * scale, width, 20f * scale);
+                    bounds.Top + 23f * scale, width, 26f * scale);
             chartBounds = RectangleF.FromLTRB(bounds.Left,
                 bounds.Top + 49f * scale, bounds.Right, bounds.Bottom);
 
             using (var titleFont = new Font(Ui.FontFamilyName,
                 Math.Max(5.8f, 7.6f * visualScale), FontStyle.Bold))
             using (var bodyFont = new Font(Ui.FontFamilyName,
-                Math.Max(5.6f, 7.1f * visualScale), FontStyle.Bold))
+                Math.Max(5.8f, 8.0f * visualScale), FontStyle.Bold))
+            using (var weekdayFont = new Font(Ui.FontFamilyName,
+                Math.Max(5.8f, 7.2f * visualScale), FontStyle.Bold))
             using (var dateFont = new Font(Ui.FontFamilyName,
-                Math.Max(6.2f, 8.1f * visualScale), FontStyle.Regular))
+                Math.Max(6.4f, 8.4f * visualScale), FontStyle.Regular))
             using (var dateAvailableFont = new Font(Ui.FontFamilyName,
-                Math.Max(6.2f, 8.1f * visualScale), FontStyle.Bold))
+                Math.Max(6.4f, 8.4f * visualScale), FontStyle.Bold))
             using (var smallFont = new Font(Ui.FontFamilyName,
                 Math.Max(5.0f, 6.2f * visualScale)))
             using (var primaryBrush = new SolidBrush(primary))
@@ -275,10 +277,12 @@ namespace CodexLocalDashboard
             using (var center = CenterFormat())
             {
                 var titleSize = graphics.MeasureString("历史数据", titleFont);
-                titleBounds = new RectangleF(bounds.Left, bounds.Top,
-                    titleSize.Width + 2f * scale, 18f * scale);
+                titleBounds = new RectangleF(
+                    bounds.Left + (bounds.Width - titleSize.Width) / 2f,
+                    bounds.Top, titleSize.Width + 2f * scale,
+                    20f * scale);
                 graphics.DrawString("历史数据", titleFont, primaryBrush,
-                    new PointF(bounds.Left, bounds.Top));
+                    titleBounds, center);
                 Ui.DrawEmbeddedClose(graphics, closeBounds, muted, scale);
                 DrawBox(graphics, previousBounds, "‹", bodyFont,
                     primaryBrush, surfaceBrush, borderPen, center);
@@ -292,14 +296,26 @@ namespace CodexLocalDashboard
                     var date = weekStart.AddDays(i);
                     var available = availableDates.Contains(date);
                     if (date == selectedDate)
-                        graphics.DrawRectangle(bluePen, dayBounds[i].X - 1f,
-                            dayBounds[i].Y - 1f, dayBounds[i].Width + 2f,
-                            dayBounds[i].Height + 2f);
-                    graphics.DrawString(date.ToString("M/d",
-                        CultureInfo.InvariantCulture),
+                        Ui.DrawRoundedRectangle(graphics, bluePen,
+                            new RectangleF(dayBounds[i].X - 1f,
+                                dayBounds[i].Y - 1f,
+                                dayBounds[i].Width + 2f,
+                                dayBounds[i].Height + 2f),
+                            Math.Max(2f, 3f * scale));
+                    var weekdayBounds = new RectangleF(dayBounds[i].Left,
+                        dayBounds[i].Top, dayBounds[i].Width,
+                        13f * scale);
+                    var dateNumberBounds = new RectangleF(dayBounds[i].Left,
+                        dayBounds[i].Top + 13f * scale,
+                        dayBounds[i].Width,
+                        Math.Max(1f, dayBounds[i].Height - 13f * scale));
+                    var dateBrush = available ? blueBrush : disabledBrush;
+                    graphics.DrawString(WeekdayLabel(date), weekdayFont,
+                        dateBrush, weekdayBounds, center);
+                    graphics.DrawString(date.Day.ToString(
+                        CultureInfo.InvariantCulture) + "日",
                         available ? dateAvailableFont : dateFont,
-                        available ? blueBrush : disabledBrush,
-                        dayBounds[i], center);
+                        dateBrush, dateNumberBounds, center);
                 }
 
                 chart.Draw(graphics, chartBounds, theme, ChartEnd(),
@@ -330,6 +346,20 @@ namespace CodexLocalDashboard
             return new DateTimeOffset(selectedDate).AddDays(1);
         }
 
+        private static string WeekdayLabel(DateTime value)
+        {
+            switch (value.DayOfWeek)
+            {
+                case DayOfWeek.Monday: return "周一";
+                case DayOfWeek.Tuesday: return "周二";
+                case DayOfWeek.Wednesday: return "周三";
+                case DayOfWeek.Thursday: return "周四";
+                case DayOfWeek.Friday: return "周五";
+                case DayOfWeek.Saturday: return "周六";
+                default: return "周日";
+            }
+        }
+
         private static DateTime StartOfWeek(DateTime value)
         {
             var offset = ((int)value.DayOfWeek + 6) % 7;
@@ -340,9 +370,9 @@ namespace CodexLocalDashboard
             string text, Font font, Brush textBrush, Brush fillBrush,
             Pen borderPen, StringFormat format)
         {
-            if (fillBrush != null) graphics.FillRectangle(fillBrush, bounds);
-            graphics.DrawRectangle(borderPen, bounds.X, bounds.Y,
-                bounds.Width, bounds.Height);
+            if (fillBrush != null)
+                Ui.FillRoundedRectangle(graphics, fillBrush, bounds, 3f);
+            Ui.DrawRoundedRectangle(graphics, borderPen, bounds, 3f);
             graphics.DrawString(text, font, textBrush, bounds, format);
         }
 

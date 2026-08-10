@@ -325,11 +325,11 @@ namespace CodexLocalDashboard
                 graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                 using (var titleFont = new Font(Ui.FontFamilyName,
-                    Math.Max(5.8f, 7.6f * visualScale), FontStyle.Regular))
+                    Math.Max(6.2f, 8.4f * visualScale), FontStyle.Regular))
                 using (var bodyFont = new Font(Ui.FontFamilyName,
-                    Math.Max(5.6f, 7.1f * visualScale), FontStyle.Regular))
+                    Math.Max(5.8f, 7.6f * visualScale), FontStyle.Regular))
                 using (var smallFont = new Font(Ui.FontFamilyName,
-                    Math.Max(5.2f, 6.5f * visualScale)))
+                    Math.Max(5.4f, 6.9f * visualScale)))
                 using (var primaryBrush = new SolidBrush(primary))
                 using (var mutedBrush = new SolidBrush(muted))
                 using (var blueBrush = new SolidBrush(blue))
@@ -493,9 +493,8 @@ namespace CodexLocalDashboard
             using (var buttonBrush = new SolidBrush(Color.FromArgb(205,
                 muted)))
             {
-                graphics.DrawRectangle(buttonPen, showAllBounds.X,
-                    showAllBounds.Y, showAllBounds.Width,
-                    showAllBounds.Height);
+                Ui.DrawRoundedRectangle(graphics, buttonPen,
+                    showAllBounds, Math.Max(2f, 3f * scale));
                 graphics.DrawString(showAll ? "仅今天" : "显示全部",
                     smallFont, buttonBrush, showAllBounds, CenterFormat);
             }
@@ -582,7 +581,7 @@ namespace CodexLocalDashboard
                 new RectangleF(bounds.Left + 21f * scale,
                     bounds.Top + 3f * scale, 47f * scale,
                     13f * scale), NearFormat);
-            graphics.DrawString(FormatSessionTime(session),
+            graphics.DrawString(FormatLatestActivity(session),
                 font, mutedBrush,
                 new RectangleF(bounds.Left + 67f * scale,
                     bounds.Top + 3f * scale, 145f * scale,
@@ -644,10 +643,8 @@ namespace CodexLocalDashboard
                 using (var buttonBrush = new SolidBrush(
                     Color.FromArgb(205, buttonColor)))
                 {
-                    graphics.DrawRectangle(buttonPen,
-                        sessionLocationBounds.X, sessionLocationBounds.Y,
-                        sessionLocationBounds.Width,
-                        sessionLocationBounds.Height);
+                    Ui.DrawRoundedRectangle(graphics, buttonPen,
+                        sessionLocationBounds, Math.Max(2f, 3f * scale));
                     graphics.DrawString(locationAvailable
                             ? "session位置" : "位置失效",
                         font, buttonBrush,
@@ -701,24 +698,14 @@ namespace CodexLocalDashboard
                 .ToList();
         }
 
-        private static string FormatSessionTime(SessionUsage session)
+        private static string FormatLatestActivity(SessionUsage session)
         {
-            var end = session.LastActivity;
-            var start = session.StartedAt;
-            if (end == DateTimeOffset.MinValue) return "时间未知";
-            if (start == DateTimeOffset.MinValue || start >= end)
-                return end.ToLocalTime().ToString("MM-dd HH:mm",
+            var latest = session.LastActivity != DateTimeOffset.MinValue
+                ? session.LastActivity : session.StartedAt;
+            return latest == DateTimeOffset.MinValue
+                ? "活动未知"
+                : "最新 " + latest.ToLocalTime().ToString("MM-dd HH:mm",
                     CultureInfo.CurrentCulture);
-            var localStart = start.ToLocalTime();
-            var localEnd = end.ToLocalTime();
-            return localStart.Date == localEnd.Date
-                ? localStart.ToString("MM-dd HH:mm",
-                    CultureInfo.CurrentCulture) + "–" +
-                    localEnd.ToString("HH:mm", CultureInfo.CurrentCulture)
-                : localStart.ToString("MM-dd HH:mm",
-                    CultureInfo.CurrentCulture) + "–" +
-                    localEnd.ToString("MM-dd HH:mm",
-                        CultureInfo.CurrentCulture);
         }
 
         private static string FormatDuration(SessionUsage session)
