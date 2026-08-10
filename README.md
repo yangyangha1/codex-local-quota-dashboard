@@ -50,13 +50,6 @@ cd macOS
 ./scripts/package-release.sh
 ```
 
-运行本地回归检查：
-
-```zsh
-cd macOS
-./scripts/run-regression-tests.sh
-```
-
 ## 界面预览
 
 **桌面仪表盘**
