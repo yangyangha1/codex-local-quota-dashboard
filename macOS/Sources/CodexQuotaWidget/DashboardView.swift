@@ -146,6 +146,13 @@ struct DashboardView: View {
                             model.selectChartRange(startFraction: $0, endFraction: $1)
                         }
                     )
+                } else {
+                    // Keep the live panel's left-clicks free for window
+                    // dragging, while still retaining the original wheel-only
+                    // timeline changes (1h ... 48h).
+                    ChartWheelOverlay { delta in
+                        model.zoomChart(delta: delta)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -786,6 +793,39 @@ private struct DetailActionButtonStyle: ButtonStyle {
 private struct ChartBrush: Equatable {
     let start: CGFloat
     let end: CGFloat
+}
+
+/// A live-dashboard-only chart layer. It receives scroll events but deliberately
+/// has no mouse-down or drag handling, so DesktopWidgetPanel can turn every
+/// live-page left click into a panel drag.
+private struct ChartWheelOverlay: NSViewRepresentable {
+    let onWheel: (Double) -> Void
+
+    func makeNSView(context: Context) -> WheelView {
+        let view = WheelView()
+        view.onWheel = onWheel
+        return view
+    }
+
+    func updateNSView(_ nsView: WheelView, context: Context) {
+        nsView.onWheel = onWheel
+    }
+
+    final class WheelView: NSView {
+        var onWheel: ((Double) -> Void)?
+
+        override var isOpaque: Bool { false }
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            bounds.contains(point) ? self : nil
+        }
+
+        override func scrollWheel(with event: NSEvent) {
+            let delta = event.hasPreciseScrollingDeltas
+                ? event.scrollingDeltaY * 12
+                : event.deltaY * 120
+            onWheel?(delta)
+        }
+    }
 }
 
 private struct ChartSelectionOverlay: View {
