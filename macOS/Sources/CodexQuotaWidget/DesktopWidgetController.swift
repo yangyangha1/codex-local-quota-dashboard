@@ -22,7 +22,8 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
     private func configureStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         guard let button = statusItem.button else { return }
-        button.image = NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: "Codex 本地额度面板")
+        button.image = bundledAppIcon()
+            ?? NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: "Codex 本地额度面板")
         button.target = self
         button.action = #selector(statusItemClicked(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -43,6 +44,19 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
         statusMenu.addItem(.separator())
         _ = addMenuItem("隐藏", action: #selector(hideWidget(_:)))
         _ = addMenuItem("退出", action: #selector(quit(_:)))
+    }
+
+    /// Reuse the Windows dashboard artwork for the macOS menu-bar icon too.
+    private func bundledAppIcon() -> NSImage? {
+        guard
+            let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+            let icon = NSImage(contentsOf: iconURL)
+        else {
+            return nil
+        }
+        icon.size = NSSize(width: 18, height: 18)
+        icon.isTemplate = false
+        return icon
     }
 
     private func addMenuItem(_ title: String, action: Selector, representedObject: Any? = nil) -> NSMenuItem {
