@@ -425,13 +425,17 @@ private struct UsageChartCanvas: View {
             )
             let grid = isLight ? Color.black.opacity(0.10) : Color.white.opacity(0.13)
             let muted = isLight ? Color.black.opacity(0.46) : Color.white.opacity(0.58)
-            for index in 0...6 {
-                let x = plot.minX + plot.width * CGFloat(index) / 6
-                let y = plot.minY + plot.height * CGFloat(index) / 6
+            let xAxisGridCells = 6
+            let yAxisGridCells = 5
+            for index in 0...xAxisGridCells {
+                let x = plot.minX + plot.width * CGFloat(index) / CGFloat(xAxisGridCells)
                 var vertical = Path()
                 vertical.move(to: CGPoint(x: x, y: plot.minY))
                 vertical.addLine(to: CGPoint(x: x, y: plot.maxY))
                 context.stroke(vertical, with: .color(grid), lineWidth: 0.5)
+            }
+            for index in 0...yAxisGridCells {
+                let y = plot.minY + plot.height * CGFloat(index) / CGFloat(yAxisGridCells)
                 var horizontal = Path()
                 horizontal.move(to: CGPoint(x: plot.minX, y: y))
                 horizontal.addLine(to: CGPoint(x: plot.maxX, y: y))

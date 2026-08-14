@@ -60,12 +60,17 @@ final class DashboardViewModel: ObservableObject {
     private static let themeKey = "CodexQuotaWidget.theme"
     private static let transparencyKey = "CodexQuotaWidget.backgroundTransparency"
     private static let topMostKey = "CodexQuotaWidget.topMost"
+    private static let topMostDefaultMigrationKey = "CodexQuotaWidget.topMost.default.v2"
 
     init() {
         let defaults = UserDefaults.standard
         theme = WidgetTheme(rawValue: defaults.string(forKey: Self.themeKey) ?? "") ?? .dark
         backgroundTransparency = min(100, max(0, defaults.object(forKey: Self.transparencyKey) as? Double ?? 10))
-        topMost = defaults.object(forKey: Self.topMostKey) as? Bool ?? true
+        if !defaults.bool(forKey: Self.topMostDefaultMigrationKey) {
+            defaults.set(false, forKey: Self.topMostKey)
+            defaults.set(true, forKey: Self.topMostDefaultMigrationKey)
+        }
+        topMost = defaults.object(forKey: Self.topMostKey) as? Bool ?? false
         historyChart = TokenRateChart()
         historyChart.setDisplayHours(24)
         liveChartSnapshot = liveChart.renderSnapshot()
