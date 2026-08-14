@@ -3,18 +3,14 @@ import Foundation
 /// Shared geometry rules for the floating desktop panel.  Keeping these values
 /// in one place prevents restored frames and live resizing from drifting apart.
 enum WidgetWindowGeometry {
-    static let designSize = CGSize(width: 320, height: 347)
-    static let minimumSize = designSize
+    static let minimumSize = CGSize(width: 256, height: 278)
     static let maximumSize = CGSize(width: 576, height: 625)
-    static let aspectRatio = designSize.width / designSize.height
 
-    static func constrainedSize(_ proposed: CGSize, relativeTo current: CGSize? = nil) -> CGSize {
-        let widthChange = current.map { abs(proposed.width - $0.width) } ?? .infinity
-        let heightChange = current.map { abs(proposed.height - $0.height) } ?? 0
-        let prefersHeight = heightChange > widthChange
-        let rawWidth = prefersHeight ? proposed.height * aspectRatio : proposed.width
-        let safeWidth = rawWidth.isFinite ? rawWidth : minimumSize.width
+    static func constrainedSize(_ proposed: CGSize) -> CGSize {
+        let safeWidth = proposed.width.isFinite ? proposed.width : minimumSize.width
+        let safeHeight = proposed.height.isFinite ? proposed.height : minimumSize.height
         let width = min(maximumSize.width, max(minimumSize.width, safeWidth))
-        return CGSize(width: width.rounded(), height: (width / aspectRatio).rounded())
+        let height = min(maximumSize.height, max(minimumSize.height, safeHeight))
+        return CGSize(width: width.rounded(), height: height.rounded())
     }
 }

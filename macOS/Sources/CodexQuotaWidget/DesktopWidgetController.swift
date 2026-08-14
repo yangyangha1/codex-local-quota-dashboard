@@ -1,5 +1,4 @@
 import AppKit
-import CoreGraphics
 import SwiftUI
 
 @MainActor
@@ -207,8 +206,8 @@ final class DesktopWidgetController: NSObject, NSWindowDelegate {
     let model = DashboardViewModel()
     private let panel: DesktopWidgetPanel
     private static let frameKey = "CodexQuotaWidget.frame.v2"
-    private static let desktopWindowLevel = NSWindow.Level(
-        rawValue: Int(CGWindowLevelForKey(.desktopWindow))
+    private static let desktopWidgetLevel = NSWindow.Level(
+        rawValue: NSWindow.Level.normal.rawValue - 1
     )
     private var isNormalizingPanelFrame = false
 
@@ -270,12 +269,11 @@ final class DesktopWidgetController: NSObject, NSWindowDelegate {
     }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        WidgetWindowGeometry.constrainedSize(frameSize, relativeTo: sender.frame.size)
+        WidgetWindowGeometry.constrainedSize(frameSize)
     }
 
     private func applyTopMost(_ topMost: Bool) {
-        panel.level = topMost ? .floating : Self.desktopWindowLevel
-        if !topMost { panel.orderBack(nil) }
+        panel.level = topMost ? .floating : Self.desktopWidgetLevel
     }
 
     private func restoreFrameOrPlaceDefault() {

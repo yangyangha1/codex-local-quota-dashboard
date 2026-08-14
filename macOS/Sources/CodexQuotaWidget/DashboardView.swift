@@ -21,7 +21,7 @@ struct DashboardView: View {
                     .fill(backgroundColor.opacity(max(0.01, (100 - model.backgroundTransparency) / 100)))
 
                 VStack(spacing: 8) {
-                    header
+                    header(compact: geometry.size.width <= 280)
                     if model.contentMode != .detail {
                         modeStrip
                     }
@@ -39,7 +39,7 @@ struct DashboardView: View {
         .preferredColorScheme(isLight ? .light : .dark)
     }
 
-    private var header: some View {
+    private func header(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .center, spacing: 5) {
                 Text(model.primaryQuota.map { "GPT·剩余\(wholePercent($0.remainingPercent))%" } ?? "GPT·暂无缓存")
@@ -49,9 +49,11 @@ struct DashboardView: View {
                     .minimumScaleFactor(0.82)
                     .layoutPriority(1)
                     .help(model.snapshot.quotas.isEmpty ? "等待 Codex 写入本地限额信息" : model.snapshot.quotas.map { "\(quotaWindowName($0.windowMinutes))：已用 \(wholePercent($0.usedPercent))%" }.joined(separator: "\n"))
-                WindowDragHandle()
-                    .frame(minWidth: 24, maxWidth: .infinity, minHeight: 28, maxHeight: 28)
-                    .help("按住此区域拖动窗口")
+                if !compact {
+                    WindowDragHandle()
+                        .frame(minWidth: 24, maxWidth: .infinity, minHeight: 28, maxHeight: 28)
+                        .help("按住此区域拖动窗口")
+                }
                 HStack(spacing: 5) {
                     Button("历史") { model.showHistory() }
                         .buttonStyle(WidgetButtonStyle(active: model.contentMode == .history, light: isLight))
@@ -427,20 +429,6 @@ private struct UsageChartCanvas: View {
             let muted = isLight ? Color.black.opacity(0.46) : Color.white.opacity(0.58)
             let xAxisGridCells = 6
             let yAxisGridCells = 5
-            for index in 0...xAxisGridCells {
-                let x = plot.minX + plot.width * CGFloat(index) / CGFloat(xAxisGridCells)
-                var vertical = Path()
-                vertical.move(to: CGPoint(x: x, y: plot.minY))
-                vertical.addLine(to: CGPoint(x: x, y: plot.maxY))
-                context.stroke(vertical, with: .color(grid), lineWidth: 0.5)
-            }
-            for index in 0...yAxisGridCells {
-                let y = plot.minY + plot.height * CGFloat(index) / CGFloat(yAxisGridCells)
-                var horizontal = Path()
-                horizontal.move(to: CGPoint(x: plot.minX, y: y))
-                horizontal.addLine(to: CGPoint(x: plot.maxX, y: y))
-                context.stroke(horizontal, with: .color(grid), lineWidth: 0.5)
-            }
 
             // The dashboard now has one permanent graph: a gray rate line with a
             // restrained purple area, plus the quota and cumulative curves.
@@ -455,6 +443,20 @@ private struct UsageChartCanvas: View {
             )
             drawSeries(snapshot.quotaPoints, maximum: 100, lineColor: quotaSeriesColor, in: plot, context: &context)
             drawSeries(snapshot.cumulativePoints, maximum: snapshot.cumulativeAxisMaximum, lineColor: cumulativeSeriesColor, in: plot, context: &context)
+            for index in 0...xAxisGridCells {
+                let x = plot.minX + plot.width * CGFloat(index) / CGFloat(xAxisGridCells)
+                var vertical = Path()
+                vertical.move(to: CGPoint(x: x, y: plot.minY))
+                vertical.addLine(to: CGPoint(x: x, y: plot.maxY))
+                context.stroke(vertical, with: .color(grid), lineWidth: 0.5)
+            }
+            for index in 0...yAxisGridCells {
+                let y = plot.minY + plot.height * CGFloat(index) / CGFloat(yAxisGridCells)
+                var horizontal = Path()
+                horizontal.move(to: CGPoint(x: plot.minX, y: y))
+                horizontal.addLine(to: CGPoint(x: plot.maxX, y: y))
+                context.stroke(horizontal, with: .color(grid), lineWidth: 0.5)
+            }
             drawScaleHints(in: plot, color: muted, context: &context)
 
             if snapshot.tokenPoints.isEmpty && snapshot.quotaPoints.isEmpty && snapshot.cumulativePoints.isEmpty {
