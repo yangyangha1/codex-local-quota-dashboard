@@ -11,11 +11,15 @@ struct ChartPoint: Equatable, Sendable, Identifiable {
 
 struct ChartRenderSnapshot: Equatable, Sendable {
     let tokenPoints: [ChartPoint]
+    /// Weekly remaining percentage (the base quota curve).
     let quotaPoints: [ChartPoint]
+    /// Independent rolling 5H remaining percentage.
+    let fiveHourQuotaPoints: [ChartPoint]
     let cumulativePoints: [ChartPoint]
     let tokenAxisMaximum: Double
     let cumulativeAxisMaximum: Double
     let currentQuota: Double?
+    let currentFiveHourQuota: Double?
     let currentTokenRate: Double?
     let peakTokenRate: Double
     let cumulativeIncrease: Double
@@ -36,9 +40,6 @@ struct TokenRateChart: Sendable {
     private static let minimumTokenAxisMaximum = 1_000.0
     private static let targetPeakAxisRatio = 0.80
     private static let tokenAxisRoundStep = 100_000.0
-    private static let quotaJitterTolerance = 0.35
-    private static let quotaResetRiseThreshold = 2.0
-    private static let quotaConsumptionEpsilon = 0.01
     private static let targetWindow: TimeInterval = 60
     private static let minimumWindow: TimeInterval = 25
     private static let maximumWindow: TimeInterval = 90
@@ -52,8 +53,6 @@ struct TokenRateChart: Sendable {
     private var rateSamples = [TokenCounterSample]()
     private var counterHistory = [TokenCounterSample]()
     private var tokenPoints = [ChartPoint]()
-    private var quotaPoints = [ChartPoint]()
-    private var quotaSourcePoints = [ChartPoint]()
 
     private(set) var displayHours = 2
     private var wheelDeltaAccumulator = 0.0
@@ -74,15 +73,8 @@ struct TokenRateChart: Sendable {
     private var normalizedCounter: Int64 = 0
     private var breakBeforeNextCounterSample = false
 
-    private var lastQuotaRemaining: Double?
-    private var lastQuotaCalculationAt: Date?
-    private var breakBeforeNextQuotaPoint = false
-    private var hasQuotaSource = false
-    private var lastQuotaSource = 0.0
-    private var quotaConsumptionReferenceRemaining = 0.0
-    private var quotaConsumedDuringRuntime = 0.0
-    private var quotaWindowMinutes = 0
-    private var quotaResetsAt: Date?
+    private var weeklyQuota = QuotaSeries()
+    private var fiveHourQuota = QuotaSeries()
 
     mutating func setDisplayHours(_ hours: Int) {
         guard Self.zoomLevels.contains(hours) else { return }
@@ -150,9 +142,12 @@ struct TokenRateChart: Sendable {
             capture(
                 capturedAt: sample.at,
                 cumulativeTokens: overflow ? Int64.max : max(0, total),
-                remainingPercent: sample.remainingPercent,
-                windowMinutes: sample.windowMinutes,
-                resetsAt: sample.resetsAt
+                weeklyRemainingPercent: sample.remainingPercent,
+                weeklyWindowMinutes: sample.windowMinutes,
+                weeklyResetsAt: sample.resetsAt,
+                fiveHourRemainingPercent: sample.fiveHourRemainingPercent,
+                fiveHourWindowMinutes: sample.fiveHourWindowMinutes,
+                fiveHourResetsAt: sample.fiveHourResetsAt
             )
         }
         historicalSource = true
@@ -161,9 +156,12 @@ struct TokenRateChart: Sendable {
     mutating func capture(
         capturedAt: Date,
         cumulativeTokens: Int64,
-        remainingPercent: Double?,
-        windowMinutes: Int,
-        resetsAt: Date?
+        weeklyRemainingPercent: Double?,
+        weeklyWindowMinutes: Int,
+        weeklyResetsAt: Date?,
+        fiveHourRemainingPercent: Double?,
+        fiveHourWindowMinutes: Int,
+        fiveHourResetsAt: Date?
     ) {
         prune(now: capturedAt)
         if let lastCaptureAt, capturedAt <= lastCaptureAt {
@@ -176,16 +174,46 @@ struct TokenRateChart: Sendable {
             rateSamples.removeAll()
             lastTokenRate = nil
             lastRateCalculationAt = nil
-            lastQuotaRemaining = nil
-            lastQuotaCalculationAt = nil
-            hasQuotaSource = false
+            weeklyQuota.markDiscontinuous()
+            fiveHourQuota.markDiscontinuous()
             breakBeforeNextTokenPoint = true
-            breakBeforeNextQuotaPoint = true
             breakBeforeNextCounterSample = true
         }
         lastCaptureAt = capturedAt
         captureToken(at: capturedAt, cumulativeTokens: cumulativeTokens)
-        captureQuota(at: capturedAt, remainingPercent: remainingPercent, windowMinutes: windowMinutes, resetsAt: resetsAt)
+        weeklyQuota.capture(
+            at: capturedAt,
+            remainingPercent: weeklyRemainingPercent,
+            windowMinutes: weeklyWindowMinutes,
+            resetsAt: weeklyResetsAt
+        )
+        fiveHourQuota.capture(
+            at: capturedAt,
+            remainingPercent: fiveHourRemainingPercent,
+            windowMinutes: fiveHourWindowMinutes,
+            resetsAt: fiveHourResetsAt
+        )
+    }
+
+    /// Preserve the old single-quota entry point for callers compiled against
+    /// the pre-5H chart API.  Those values are treated as the weekly series.
+    mutating func capture(
+        capturedAt: Date,
+        cumulativeTokens: Int64,
+        remainingPercent: Double?,
+        windowMinutes: Int,
+        resetsAt: Date?
+    ) {
+        capture(
+            capturedAt: capturedAt,
+            cumulativeTokens: cumulativeTokens,
+            weeklyRemainingPercent: remainingPercent,
+            weeklyWindowMinutes: windowMinutes,
+            weeklyResetsAt: resetsAt,
+            fiveHourRemainingPercent: nil,
+            fiveHourWindowMinutes: 0,
+            fiveHourResetsAt: nil
+        )
     }
 
     mutating func captureFailure(capturedAt: Date) {
@@ -200,18 +228,17 @@ struct TokenRateChart: Sendable {
             rateSamples.removeAll()
             lastTokenRate = nil
             lastRateCalculationAt = nil
-            lastQuotaRemaining = nil
-            lastQuotaCalculationAt = nil
-            hasQuotaSource = false
+            weeklyQuota.markDiscontinuous()
+            fiveHourQuota.markDiscontinuous()
             breakBeforeNextTokenPoint = true
-            breakBeforeNextQuotaPoint = true
             breakBeforeNextCounterSample = true
             self.lastCaptureAt = capturedAt
             return
         }
         lastCaptureAt = capturedAt
         appendTokenHold(at: capturedAt)
-        appendQuotaHold(at: capturedAt)
+        weeklyQuota.appendHold(at: capturedAt)
+        fiveHourQuota.appendHold(at: capturedAt)
         pruneRateSamples(now: capturedAt)
     }
 
@@ -221,10 +248,12 @@ struct TokenRateChart: Sendable {
         let timelineStart = self.timelineStart(now: now)
         let timelineEnd = (customViewFrom != nil && customViewTo != nil) ? customViewTo! : now
         let selectedTokens = Self.select(tokenPoints, from: timelineStart, to: timelineEnd)
-        let selectedQuota = Self.select(quotaPoints, from: timelineStart, to: timelineEnd)
-        let selectedQuotaSource = Self.selectWithBaseline(quotaSourcePoints, from: timelineStart, to: timelineEnd)
+        let selectedQuota = Self.select(weeklyQuota.points, from: timelineStart, to: timelineEnd)
+        let selectedQuotaSource = Self.selectWithBaseline(weeklyQuota.sourcePoints, from: timelineStart, to: timelineEnd)
+        let selectedFiveHourQuota = Self.select(fiveHourQuota.points, from: timelineStart, to: timelineEnd)
         let cumulativePoints = buildCumulativePoints(from: timelineStart, to: timelineEnd)
-        let currentQuota = hasQuotaSource ? lastQuotaSource : selectedQuota.last?.value
+        let currentQuota = weeklyQuota.currentValue ?? selectedQuota.last?.value
+        let currentFiveHourQuota = fiveHourQuota.currentValue ?? selectedFiveHourQuota.last?.value
         let cumulativeIncrease = calculatePeriodIncrease(from: timelineStart, to: timelineEnd)
         let peakRate = selectedTokens.map(\.value).max() ?? 0
         let duration = customViewFrom != nil && customViewTo != nil
@@ -234,14 +263,16 @@ struct TokenRateChart: Sendable {
         return ChartRenderSnapshot(
             tokenPoints: selectedTokens,
             quotaPoints: selectedQuota,
+            fiveHourQuotaPoints: selectedFiveHourQuota,
             cumulativePoints: cumulativePoints,
             tokenAxisMaximum: Self.calculateRoundedTokenAxisMaximum(peakRate),
             cumulativeAxisMaximum: Self.calculateCumulativeAxis(cumulativePoints),
             currentQuota: currentQuota,
+            currentFiveHourQuota: currentFiveHourQuota,
             currentTokenRate: selectedTokens.last?.value ?? (historicalSource ? nil : lastTokenRate),
             peakTokenRate: peakRate,
             cumulativeIncrease: cumulativeIncrease,
-            quotaConsumedDuringRuntime: Self.calculateQuotaConsumption(selectedQuotaSource, carryAcrossHistoricalGaps: historicalSource),
+            quotaConsumedDuringRuntime: QuotaSeries.calculateConsumption(selectedQuotaSource, carryAcrossHistoricalGaps: historicalSource),
             timelineStart: timelineStart,
             timelineEnd: timelineStart.addingTimeInterval(duration),
             displayDuration: duration,
@@ -316,64 +347,222 @@ struct TokenRateChart: Sendable {
         }
     }
 
-    private mutating func captureQuota(at: Date, remainingPercent: Double?, windowMinutes: Int, resetsAt: Date?) {
-        guard let supplied = remainingPercent, windowMinutes > 0,
-              supplied.isFinite, supplied >= -0.01, supplied <= 100.01
-        else { appendQuotaHold(at: at); return }
-        let remaining = max(0, min(100, supplied))
-        guard hasQuotaSource else {
-            startQuotaWindow(at: at, remaining: remaining, windowMinutes: windowMinutes, resetsAt: resetsAt, breakBefore: breakBeforeNextQuotaPoint)
-            return
-        }
-        let identityChanged = windowMinutes != quotaWindowMinutes || resetsAt != quotaResetsAt
-        let rise = remaining - lastQuotaSource
-        if identityChanged || rise > Self.quotaResetRiseThreshold {
-            startQuotaWindow(at: at, remaining: remaining, windowMinutes: windowMinutes, resetsAt: resetsAt, breakBefore: true)
-            return
-        }
-        if remaining < quotaConsumptionReferenceRemaining - Self.quotaConsumptionEpsilon {
-            quotaConsumedDuringRuntime += quotaConsumptionReferenceRemaining - remaining
-            quotaConsumptionReferenceRemaining = remaining
-        }
-        if rise > Self.quotaJitterTolerance {
-            lastQuotaSource = remaining
-            lastQuotaCalculationAt = at
-            appendQuotaHold(at: at)
-            return
-        }
-        lastQuotaSource = remaining
-        appendQuotaSourcePoint(at: at, value: remaining, breakBefore: false)
-        appendQuotaPoint(at: at, value: stabilizeQuota(at: at, rawRemaining: remaining), forceBreakBefore: false)
-    }
+    /// A quota stream is deliberately reusable: live and history replay use
+    /// the same state machine for the weekly base curve and the 5H curve.
+    private struct QuotaSeries: Sendable {
+        private static let jitterTolerance = 0.35
+        private static let resetRiseThreshold = 2.0
+        private static let consumptionEpsilon = 0.01
+        private static let smoothingTime: TimeInterval = 30
+        private static let pointBucketDuration: TimeInterval = 30
+        private static let maximumContinuousGap: TimeInterval = 120
 
-    private mutating func startQuotaWindow(at: Date, remaining: Double, windowMinutes: Int, resetsAt: Date?, breakBefore: Bool) {
-        hasQuotaSource = true
-        lastQuotaSource = remaining
-        quotaConsumptionReferenceRemaining = remaining
-        quotaWindowMinutes = windowMinutes
-        quotaResetsAt = resetsAt
-        lastQuotaCalculationAt = at
-        appendQuotaSourcePoint(at: at, value: remaining, breakBefore: breakBefore || quotaSourcePoints.isEmpty)
-        appendQuotaPoint(at: at, value: remaining, forceBreakBefore: breakBefore || quotaPoints.isEmpty)
-    }
+        fileprivate var points = [ChartPoint]()
+        fileprivate var sourcePoints = [ChartPoint]()
+        private var lastRemaining: Double?
+        private var lastCalculationAt: Date?
+        private var breakBeforeNextPoint = false
+        private var hasSource = false
+        private var lastSource = 0.0
+        private var consumptionReferenceRemaining = 0.0
+        private var windowMinutes = 0
+        private var resetsAt: Date?
 
-    private mutating func stabilizeQuota(at: Date, rawRemaining: Double) -> Double {
-        guard let previous = lastQuotaRemaining, let lastQuotaCalculationAt, at > lastQuotaCalculationAt else {
-            lastQuotaCalculationAt = at
-            return rawRemaining
+        var currentValue: Double? { hasSource ? lastSource : nil }
+
+        mutating func capture(at: Date, remainingPercent: Double?, windowMinutes: Int, resetsAt: Date?) {
+            guard let supplied = remainingPercent, windowMinutes > 0,
+                  supplied.isFinite, supplied >= -0.01, supplied <= 100.01
+            else {
+                appendHold(at: at)
+                return
+            }
+
+            let remaining = max(0, min(100, supplied))
+            guard hasSource else {
+                startWindow(
+                    at: at,
+                    remaining: remaining,
+                    windowMinutes: windowMinutes,
+                    resetsAt: resetsAt,
+                    breakBefore: breakBeforeNextPoint
+                )
+                return
+            }
+
+            let identityChanged = windowMinutes != self.windowMinutes || resetsAt != self.resetsAt
+            let rise = remaining - lastSource
+            if identityChanged || rise > Self.resetRiseThreshold {
+                startWindow(
+                    at: at,
+                    remaining: remaining,
+                    windowMinutes: windowMinutes,
+                    resetsAt: resetsAt,
+                    breakBefore: true
+                )
+                return
+            }
+
+            if rise > Self.jitterTolerance {
+                lastSource = remaining
+                lastCalculationAt = at
+                appendHold(at: at)
+                return
+            }
+
+            lastSource = remaining
+            appendSourcePoint(at: at, value: remaining, breakBefore: false)
+            appendRenderedPoint(at: at, value: stabilize(at: at, rawRemaining: remaining), forceBreakBefore: false)
         }
-        let elapsed = at.timeIntervalSince(lastQuotaCalculationAt)
-        let alpha = max(0.35, min(0.80, 1 - exp(-elapsed / Self.smoothingTime)))
-        self.lastQuotaCalculationAt = at
-        return previous + alpha * (rawRemaining - previous)
+
+        mutating func appendHold(at: Date) {
+            guard let lastRemaining else { return }
+            guard !Self.hasLongGap(points, at: at) else {
+                breakBeforeNextPoint = true
+                return
+            }
+            appendRenderedPoint(at: at, value: lastRemaining, forceBreakBefore: false)
+        }
+
+        mutating func markDiscontinuous() {
+            lastRemaining = nil
+            lastCalculationAt = nil
+            hasSource = false
+            breakBeforeNextPoint = true
+        }
+
+        mutating func reset() {
+            points.removeAll()
+            sourcePoints.removeAll()
+            lastRemaining = nil
+            lastCalculationAt = nil
+            breakBeforeNextPoint = false
+            hasSource = false
+            lastSource = 0
+            consumptionReferenceRemaining = 0
+            windowMinutes = 0
+            resetsAt = nil
+        }
+
+        mutating func prune(olderThan oldest: Date) {
+            Self.prunePoints(&points, olderThan: oldest)
+            Self.prunePoints(&sourcePoints, olderThan: oldest)
+        }
+
+        static func calculateConsumption(_ points: [ChartPoint], carryAcrossHistoricalGaps: Bool) -> Double {
+            guard points.count >= 2 else { return 0 }
+            var total = 0.0
+            var reference = points[0].value
+            for point in points.dropFirst() {
+                if point.breakBefore && !carryAcrossHistoricalGaps {
+                    reference = point.value
+                    continue
+                }
+                if point.breakBefore && point.value > reference {
+                    reference = point.value
+                    continue
+                }
+                if point.value < reference - consumptionEpsilon {
+                    total += reference - point.value
+                    reference = point.value
+                }
+            }
+            return total
+        }
+
+        private mutating func startWindow(
+            at: Date,
+            remaining: Double,
+            windowMinutes: Int,
+            resetsAt: Date?,
+            breakBefore: Bool
+        ) {
+            hasSource = true
+            lastSource = remaining
+            consumptionReferenceRemaining = remaining
+            self.windowMinutes = windowMinutes
+            self.resetsAt = resetsAt
+            lastCalculationAt = at
+            appendSourcePoint(at: at, value: remaining, breakBefore: breakBefore || sourcePoints.isEmpty)
+            appendRenderedPoint(at: at, value: remaining, forceBreakBefore: breakBefore || points.isEmpty)
+        }
+
+        private mutating func stabilize(at: Date, rawRemaining: Double) -> Double {
+            guard let previous = lastRemaining, let lastCalculationAt, at > lastCalculationAt else {
+                lastCalculationAt = at
+                return rawRemaining
+            }
+            let elapsed = at.timeIntervalSince(lastCalculationAt)
+            let alpha = max(0.35, min(0.80, 1 - exp(-elapsed / Self.smoothingTime)))
+            self.lastCalculationAt = at
+            return previous + alpha * (rawRemaining - previous)
+        }
+
+        private mutating func appendRenderedPoint(at: Date, value: Double, forceBreakBefore: Bool) {
+            Self.appendContinuousPoint(
+                &points,
+                at: at,
+                value: value,
+                breakBefore: forceBreakBefore || breakBeforeNextPoint
+            )
+            lastRemaining = value
+            breakBeforeNextPoint = false
+        }
+
+        private mutating func appendSourcePoint(at: Date, value: Double, breakBefore: Bool) {
+            Self.appendPoint(&sourcePoints, at: at, value: value, breakBefore: breakBefore)
+        }
+
+        private static func appendContinuousPoint(_ points: inout [ChartPoint], at: Date, value: Double, breakBefore: Bool) {
+            if let previous = points.last {
+                guard at > previous.at else { return }
+                if samePointBucket(previous.at, at) {
+                    points[points.count - 1] = ChartPoint(
+                        at: at,
+                        value: value,
+                        breakBefore: breakBefore || previous.breakBefore,
+                        sampleCount: 1
+                    )
+                    return
+                }
+            }
+            points.append(ChartPoint(at: at, value: value, breakBefore: breakBefore || points.isEmpty, sampleCount: 1))
+        }
+
+        private static func appendPoint(_ points: inout [ChartPoint], at: Date, value: Double, breakBefore initialBreak: Bool) {
+            var breakBefore = initialBreak
+            if let previous = points.last {
+                guard at > previous.at else { return }
+                if at.timeIntervalSince(previous.at) > maximumContinuousGap { breakBefore = true }
+                if !breakBefore && !previous.breakBefore && samePointBucket(previous.at, at) {
+                    points[points.count - 1] = ChartPoint(at: at, value: value, breakBefore: previous.breakBefore, sampleCount: 1)
+                    return
+                }
+            }
+            points.append(ChartPoint(at: at, value: value, breakBefore: breakBefore, sampleCount: 1))
+        }
+
+        private static func prunePoints(_ points: inout [ChartPoint], olderThan oldest: Date) {
+            let count = points.prefix { $0.at < oldest }.count
+            if count >= 64 || count == points.count, count > 0 { points.removeFirst(count) }
+        }
+
+        private static func hasLongGap(_ points: [ChartPoint], at: Date) -> Bool {
+            guard let last = points.last else { return false }
+            return at.timeIntervalSince(last.at) > maximumContinuousGap
+        }
+
+        private static func samePointBucket(_ lhs: Date, _ rhs: Date) -> Bool {
+            Int64(lhs.timeIntervalSince1970 / pointBucketDuration) == Int64(rhs.timeIntervalSince1970 / pointBucketDuration)
+        }
     }
 
     private mutating func resetAll(captureAt: Date?) {
         rateSamples.removeAll()
         counterHistory.removeAll()
         tokenPoints.removeAll()
-        quotaPoints.removeAll()
-        quotaSourcePoints.removeAll()
+        weeklyQuota.reset()
+        fiveHourQuota.reset()
         lastCaptureAt = captureAt
         chartOriginAt = captureAt
         clearSelection()
@@ -386,15 +575,6 @@ struct TokenRateChart: Sendable {
         lastSourceDay = nil
         normalizedCounter = 0
         breakBeforeNextCounterSample = false
-        lastQuotaRemaining = nil
-        lastQuotaCalculationAt = nil
-        breakBeforeNextQuotaPoint = false
-        hasQuotaSource = false
-        lastQuotaSource = 0
-        quotaConsumptionReferenceRemaining = 0
-        quotaConsumedDuringRuntime = 0
-        quotaWindowMinutes = 0
-        quotaResetsAt = nil
     }
 
     private mutating func appendTokenHold(at: Date) {
@@ -404,11 +584,6 @@ struct TokenRateChart: Sendable {
             return
         }
         appendTokenPoint(at: at, value: lastTokenRate, forceBreakBefore: false)
-    }
-
-    private mutating func appendQuotaHold(at: Date) {
-        guard let lastQuotaRemaining, !Self.hasLongGap(quotaPoints, at: at) else { return }
-        appendQuotaPoint(at: at, value: lastQuotaRemaining, forceBreakBefore: false)
     }
 
     private static func hasLongGap(_ points: [ChartPoint], at: Date) -> Bool {
@@ -435,27 +610,6 @@ struct TokenRateChart: Sendable {
             }
         }
         points.append(ChartPoint(at: at, value: value, breakBefore: breakBefore, sampleCount: 1))
-    }
-
-    private mutating func appendQuotaPoint(at: Date, value: Double, forceBreakBefore _: Bool) {
-        Self.appendContinuousPoint(&quotaPoints, at: at, value: value)
-        lastQuotaRemaining = value
-        breakBeforeNextQuotaPoint = false
-    }
-
-    private static func appendContinuousPoint(_ points: inout [ChartPoint], at: Date, value: Double) {
-        if let previous = points.last {
-            guard at > previous.at else { return }
-            if samePointBucket(previous.at, at) {
-                points[points.count - 1] = ChartPoint(at: at, value: value, breakBefore: previous.breakBefore, sampleCount: 1)
-                return
-            }
-        }
-        points.append(ChartPoint(at: at, value: value, breakBefore: points.isEmpty, sampleCount: 1))
-    }
-
-    private mutating func appendQuotaSourcePoint(at: Date, value: Double, breakBefore: Bool) {
-        Self.appendPoint(&quotaSourcePoints, at: at, value: value, breakBefore: breakBefore)
     }
 
     private static func appendPoint(_ points: inout [ChartPoint], at: Date, value: Double, breakBefore initialBreak: Bool) {
@@ -499,8 +653,8 @@ struct TokenRateChart: Sendable {
     private mutating func prune(now: Date) {
         let oldest = now.addingTimeInterval(-Self.maximumDisplayDuration - Self.retentionSlack)
         Self.prunePoints(&tokenPoints, olderThan: oldest)
-        Self.prunePoints(&quotaPoints, olderThan: oldest)
-        Self.prunePoints(&quotaSourcePoints, olderThan: oldest)
+        weeklyQuota.prune(olderThan: oldest)
+        fiveHourQuota.prune(olderThan: oldest)
         Self.pruneCounterSamples(&counterHistory, olderThan: oldest)
         pruneRateSamples(now: now)
     }
@@ -645,26 +799,6 @@ struct TokenRateChart: Sendable {
         return output
     }
 
-    private static func calculateQuotaConsumption(_ points: [ChartPoint], carryAcrossHistoricalGaps: Bool) -> Double {
-        guard points.count >= 2 else { return 0 }
-        var total = 0.0
-        var reference = points[0].value
-        for point in points.dropFirst() {
-            if point.breakBefore && !carryAcrossHistoricalGaps {
-                reference = point.value
-                continue
-            }
-            if point.breakBefore && point.value > reference {
-                reference = point.value
-                continue
-            }
-            if point.value < reference - quotaConsumptionEpsilon {
-                total += reference - point.value
-                reference = point.value
-            }
-        }
-        return total
-    }
 }
 
 private struct TokenCounterSample: Sendable {

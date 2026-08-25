@@ -11,7 +11,7 @@ struct DashboardView: View {
     private var mutedColor: Color { isLight ? Color(red: 0.35, green: 0.40, blue: 0.46) : Color(red: 0.56, green: 0.60, blue: 0.66) }
     private let modeStripHeight: CGFloat = 42
     private var quotaHeadlineFont: Font {
-        Font(NSFont(name: "PingFangSC-Semibold", size: 22) ?? NSFont.systemFont(ofSize: 22, weight: .semibold))
+        Font(NSFont(name: "PingFangSC-Semibold", size: 21) ?? NSFont.systemFont(ofSize: 21, weight: .semibold))
     }
 
     var body: some View {
@@ -42,11 +42,11 @@ struct DashboardView: View {
     private func header(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .center, spacing: 5) {
-                Text(model.primaryQuota.map { "GPT·剩余\(wholePercent($0.remainingPercent))%" } ?? "GPT·暂无缓存")
+                Text(quotaHeadline)
                     .font(quotaHeadlineFont)
                     .foregroundStyle(primaryColor)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.82)
+                    .minimumScaleFactor(0.66)
                     .layoutPriority(1)
                     .help(model.snapshot.quotas.isEmpty ? "等待 Codex 写入本地限额信息" : model.snapshot.quotas.map { "\(quotaWindowName($0.windowMinutes))：已用 \(wholePercent($0.usedPercent))%" }.joined(separator: "\n"))
                 if !compact {
@@ -67,7 +67,11 @@ struct DashboardView: View {
                 .fixedSize(horizontal: true, vertical: false)
             }
 
-            QuotaProgressBar(value: model.primaryQuota?.remainingPercent ?? 0, track: isLight ? Color(red: 0.83, green: 0.85, blue: 0.89) : Color.white.opacity(0.16))
+            DualQuotaProgressBar(
+                weeklyValue: model.weeklyQuota?.remainingPercent,
+                fiveHourValue: model.fiveHourQuota?.remainingPercent,
+                track: isLight ? Color(red: 0.83, green: 0.85, blue: 0.89) : Color.white.opacity(0.16)
+            )
                 .frame(height: 9)
 
             Text(quotaSubtitle)
@@ -77,16 +81,32 @@ struct DashboardView: View {
         }
     }
 
+    private var quotaHeadline: String {
+        switch (model.fiveHourQuota, model.weeklyQuota) {
+        case let (fiveHour?, weekly?):
+            return "GPT·5H\(wholePercent(fiveHour.remainingPercent))%/周\(wholePercent(weekly.remainingPercent))%"
+        case let (fiveHour?, nil):
+            return "GPT·5H\(wholePercent(fiveHour.remainingPercent))%"
+        case let (nil, weekly?):
+            return "GPT·周\(wholePercent(weekly.remainingPercent))%"
+        case (nil, nil):
+            return "GPT·暂无缓存"
+        }
+    }
+
     private var quotaSubtitle: String {
-        guard let quota = model.primaryQuota else {
+        guard model.fiveHourQuota != nil || model.weeklyQuota != nil else {
             return model.isRefreshing ? "正在扫描本地日志" : "等待 Codex 写入限额信息"
         }
-        let reset = quota.resetsAt.map { date in
-            let formatter = DateFormatter()
-            formatter.dateFormat = "M月d日 HH:mm"
-            return formatter.string(from: date)
-        } ?? "未知"
-        return "已用 \(wholePercent(quota.usedPercent))% · 重置 \(reset)"
+        return "5H重置 \(resetText(for: model.fiveHourQuota)) · 周重置 \(resetText(for: model.weeklyQuota))"
+    }
+
+    private func resetText(for quota: QuotaWindow?) -> String {
+        guard let reset = quota?.resetsAt else { return "—" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter.string(from: reset)
     }
 
     private var metrics: some View {
@@ -303,49 +323,88 @@ private struct MetricView: View {
     }
 }
 
-private struct QuotaProgressBar: View {
-    let value: Double
+/// The weekly remaining quota is the physical upper bound.  The patterned 5H
+/// overlay is scaled inside it, so a full 5H allowance can never imply more
+/// usable quota than the weekly allowance left underneath.
+private struct DualQuotaProgressBar: View {
+    let weeklyValue: Double?
+    let fiveHourValue: Double?
     let track: Color
 
     var body: some View {
         GeometryReader { geometry in
+            let weeklyFraction = fraction(weeklyValue)
+            let fiveHourFraction = fraction(fiveHourValue)
+            let hasWeeklyQuota = weeklyValue != nil
+            let baseFraction = hasWeeklyQuota ? weeklyFraction : (fiveHourValue == nil ? 0 : 1)
+            let overlayFraction = hasWeeklyQuota
+                ? weeklyFraction * fiveHourFraction
+                : fiveHourFraction
             ZStack(alignment: .leading) {
                 Capsule().fill(track)
-                Capsule()
-                    .fill(quotaColor(value))
-                    .frame(width: max(0, geometry.size.width * min(1, max(0, value / 100))))
+                if baseFraction > 0 {
+                    Capsule()
+                        .fill(quotaColor(weeklyValue ?? fiveHourValue ?? 0))
+                        .frame(width: max(0, geometry.size.width * baseFraction))
+                }
+                if overlayFraction > 0 {
+                    Capsule()
+                        .fill(quotaColor(fiveHourValue ?? weeklyValue ?? 0))
+                        .overlay(FiveHourQuotaPattern())
+                        .clipShape(Capsule())
+                        .frame(width: max(0, geometry.size.width * overlayFraction))
+                }
             }
         }
     }
 
-    private func quotaColor(_ remaining: Double) -> Color {
-        // Exact continuous upstream stops: red at 0%, moving
-        // through orange/yellow to green at 100%, rather than discrete bands.
-        let value = min(100, max(0, remaining))
-        let stops: [Double] = [0, 10, 30, 35, 50, 65, 80, 100]
-        let colors: [(Double, Double, Double)] = [
-            (211, 61, 61),
-            (224, 75, 68),
-            (229, 103, 58),
-            (232, 145, 53),
-            (224, 174, 57),
-            (164, 197, 72),
-            (91, 201, 117),
-            (73, 205, 143)
-        ]
-        for index in 0..<(stops.count - 1) where value <= stops[index + 1] {
-            let amount = (value - stops[index]) / (stops[index + 1] - stops[index])
-            let from = colors[index]
-            let to = colors[index + 1]
-            return Color(
-                red: (from.0 + (to.0 - from.0) * amount) / 255,
-                green: (from.1 + (to.1 - from.1) * amount) / 255,
-                blue: (from.2 + (to.2 - from.2) * amount) / 255
-            )
-        }
-        let end = colors[colors.count - 1]
-        return Color(red: end.0 / 255, green: end.1 / 255, blue: end.2 / 255)
+    private func fraction(_ value: Double?) -> CGFloat {
+        CGFloat(max(0, min(1, (value ?? 0) / 100)))
     }
+}
+
+private struct FiveHourQuotaPattern: View {
+    var body: some View {
+        Canvas { context, size in
+            guard size.width > 0, size.height > 0 else { return }
+            var stripes = Path()
+            for offset in stride(from: -size.height, through: size.width + size.height, by: 5) {
+                stripes.move(to: CGPoint(x: offset, y: size.height))
+                stripes.addLine(to: CGPoint(x: offset + size.height, y: 0))
+            }
+            context.stroke(stripes, with: .color(.white.opacity(0.38)), lineWidth: 0.85)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private func quotaColor(_ remaining: Double) -> Color {
+    // Exact continuous upstream stops: red at 0%, moving through
+    // orange/yellow to green at 100%, rather than discrete bands.
+    let value = min(100, max(0, remaining))
+    let stops: [Double] = [0, 10, 30, 35, 50, 65, 80, 100]
+    let colors: [(Double, Double, Double)] = [
+        (211, 61, 61),
+        (224, 75, 68),
+        (229, 103, 58),
+        (232, 145, 53),
+        (224, 174, 57),
+        (164, 197, 72),
+        (91, 201, 117),
+        (73, 205, 143)
+    ]
+    for index in 0..<(stops.count - 1) where value <= stops[index + 1] {
+        let amount = (value - stops[index]) / (stops[index + 1] - stops[index])
+        let from = colors[index]
+        let to = colors[index + 1]
+        return Color(
+            red: (from.0 + (to.0 - from.0) * amount) / 255,
+            green: (from.1 + (to.1 - from.1) * amount) / 255,
+            blue: (from.2 + (to.2 - from.2) * amount) / 255
+        )
+    }
+    let end = colors[colors.count - 1]
+    return Color(red: end.0 / 255, green: end.1 / 255, blue: end.2 / 255)
 }
 
 private struct WidgetButtonStyle: ButtonStyle {
@@ -367,6 +426,7 @@ private struct WidgetButtonStyle: ButtonStyle {
 }
 
 private let quotaSeriesColor = Color(red: 0.20, green: 0.72, blue: 0.47)
+private let fiveHourQuotaSeriesColor = Color(red: 0.95, green: 0.49, blue: 0.17)
 private let rateSeriesColor = Color.gray
 private let cumulativeSeriesColor = Color(red: 0.27, green: 0.62, blue: 0.96)
 private let rateAreaColor = Color(red: 0.63, green: 0.48, blue: 0.84)
@@ -378,6 +438,11 @@ private struct ChartInfoLine: View {
         HStack(spacing: 0) {
             Text("消耗额度 \(wholePercent(snapshot.quotaConsumedDuringRuntime))% · \(durationText)")
                 .foregroundStyle(quotaSeriesColor)
+            if let fiveHourQuota = snapshot.currentFiveHourQuota {
+                Spacer(minLength: 7)
+                Text("5H \(wholePercent(fiveHourQuota))%")
+                    .foregroundStyle(fiveHourQuotaSeriesColor)
+            }
             if showsRate {
                 Spacer(minLength: 8)
                 Text("速率 \(rateText)")
@@ -390,7 +455,7 @@ private struct ChartInfoLine: View {
         .font(.system(size: 10, weight: .semibold))
         .monospacedDigit()
         .lineLimit(1)
-        .minimumScaleFactor(0.78)
+        .minimumScaleFactor(0.66)
     }
 
     private var durationText: String {
@@ -442,6 +507,7 @@ private struct UsageChartCanvas: View {
                 context: &context
             )
             drawSeries(snapshot.quotaPoints, maximum: 100, lineColor: quotaSeriesColor, in: plot, context: &context)
+            drawSeries(snapshot.fiveHourQuotaPoints, maximum: 100, lineColor: fiveHourQuotaSeriesColor, in: plot, context: &context)
             drawSeries(snapshot.cumulativePoints, maximum: snapshot.cumulativeAxisMaximum, lineColor: cumulativeSeriesColor, in: plot, context: &context)
             for index in 0...xAxisGridCells {
                 let x = plot.minX + plot.width * CGFloat(index) / CGFloat(xAxisGridCells)
@@ -459,7 +525,7 @@ private struct UsageChartCanvas: View {
             }
             drawScaleHints(in: plot, color: muted, context: &context)
 
-            if snapshot.tokenPoints.isEmpty && snapshot.quotaPoints.isEmpty && snapshot.cumulativePoints.isEmpty {
+            if snapshot.tokenPoints.isEmpty && snapshot.quotaPoints.isEmpty && snapshot.fiveHourQuotaPoints.isEmpty && snapshot.cumulativePoints.isEmpty {
                 context.draw(
                     Text("等待连续数据")
                         .font(.system(size: 10, weight: .medium))

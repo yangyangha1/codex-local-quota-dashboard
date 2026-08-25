@@ -104,7 +104,9 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
         for item in statusMenu.items where item.title == "开机自动启动" {
             item.state = widget.model.launchAtLoginEnabled ? .on : .off
         }
-        if let quota = widget.model.primaryQuota {
+        if let fiveHourQuota = widget.model.fiveHourQuota, let weeklyQuota = widget.model.weeklyQuota {
+            statusItem.button?.toolTip = "Codex 5H剩余 \(wholePercent(fiveHourQuota.remainingPercent))% · 周剩余 \(wholePercent(weeklyQuota.remainingPercent))%"
+        } else if let quota = widget.model.primaryQuota {
             statusItem.button?.toolTip = "Codex 剩余额度 \(wholePercent(quota.remainingPercent))%"
         } else {
             statusItem.button?.toolTip = "Codex 本地额度面板"
@@ -121,7 +123,8 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
         quotaPopover.contentSize = NSSize(width: 258, height: 170)
         quotaPopover.contentViewController = NSHostingController(
             rootView: StatusQuotaPopoverView(
-                quota: widget.model.primaryQuota,
+                fiveHourQuota: widget.model.fiveHourQuota,
+                weeklyQuota: widget.model.weeklyQuota,
                 onOpenProjectPage: { [weak self] in self?.widget.model.openProjectPage() },
                 onShowWidget: { [weak self] in
                     self?.quotaPopover.performClose(nil)
@@ -150,7 +153,8 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 private struct StatusQuotaPopoverView: View {
-    let quota: QuotaWindow?
+    let fiveHourQuota: QuotaWindow?
+    let weeklyQuota: QuotaWindow?
     let onOpenProjectPage: () -> Void
     let onShowWidget: () -> Void
 
@@ -167,13 +171,14 @@ private struct StatusQuotaPopoverView: View {
                     .foregroundStyle(.secondary)
                     .help("打开原项目页面")
             }
-            if let quota {
-                Text("剩余 \(wholePercent(quota.remainingPercent))%")
+            if fiveHourQuota != nil || weeklyQuota != nil {
+                Text(quotaSummary)
                     .font(.system(size: 27, weight: .bold, design: .rounded))
-                HStack {
-                    Text(quotaWindowName(quota.windowMinutes))
-                    Spacer()
-                    Text(resetText(for: quota))
+                    .minimumScaleFactor(0.68)
+                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 3) {
+                    quotaResetLine(title: "5H重置", quota: fiveHourQuota)
+                    quotaResetLine(title: "周重置", quota: weeklyQuota)
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -190,6 +195,21 @@ private struct StatusQuotaPopoverView: View {
         }
         .padding(14)
         .frame(width: 258)
+    }
+
+    private var quotaSummary: String {
+        let fiveHour = fiveHourQuota.map { wholePercent($0.remainingPercent) } ?? "—"
+        let weekly = weeklyQuota.map { wholePercent($0.remainingPercent) } ?? "—"
+        return "5H \(fiveHour)% / 周 \(weekly)%"
+    }
+
+    @ViewBuilder
+    private func quotaResetLine(title: String, quota: QuotaWindow?) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(quota.map(resetText(for:)) ?? "—")
+        }
     }
 
     private func resetText(for quota: QuotaWindow) -> String {
