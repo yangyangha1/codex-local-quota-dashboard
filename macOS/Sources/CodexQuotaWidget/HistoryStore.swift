@@ -12,12 +12,56 @@ struct HistorySample: Equatable, Sendable {
     let sourceCached: Int64
     let sourceReasoning: Int64
     let isBaseline: Bool
+    /// Weekly quota fields retained under their original names so callers that
+    /// read old samples continue to work unchanged.
     let remainingPercent: Double?
     let windowMinutes: Int
     let resetsAt: Date?
+    /// Independent rolling 5H quota fields added by the v4 history record.
+    let fiveHourRemainingPercent: Double?
+    let fiveHourWindowMinutes: Int
+    let fiveHourResetsAt: Date?
     let tokenRatePerMinute: Double?
 
     var deltaTokens: Int64 { deltaInput &+ deltaOutput }
+
+    init(
+        at: Date,
+        deltaInput: Int64,
+        deltaOutput: Int64,
+        deltaCached: Int64,
+        deltaReasoning: Int64,
+        sourceInput: Int64,
+        sourceOutput: Int64,
+        sourceCached: Int64,
+        sourceReasoning: Int64,
+        isBaseline: Bool,
+        remainingPercent: Double?,
+        windowMinutes: Int,
+        resetsAt: Date?,
+        fiveHourRemainingPercent: Double? = nil,
+        fiveHourWindowMinutes: Int = 0,
+        fiveHourResetsAt: Date? = nil,
+        tokenRatePerMinute: Double? = nil
+    ) {
+        self.at = at
+        self.deltaInput = deltaInput
+        self.deltaOutput = deltaOutput
+        self.deltaCached = deltaCached
+        self.deltaReasoning = deltaReasoning
+        self.sourceInput = sourceInput
+        self.sourceOutput = sourceOutput
+        self.sourceCached = sourceCached
+        self.sourceReasoning = sourceReasoning
+        self.isBaseline = isBaseline
+        self.remainingPercent = remainingPercent
+        self.windowMinutes = windowMinutes
+        self.resetsAt = resetsAt
+        self.fiveHourRemainingPercent = fiveHourRemainingPercent
+        self.fiveHourWindowMinutes = fiveHourWindowMinutes
+        self.fiveHourResetsAt = fiveHourResetsAt
+        self.tokenRatePerMinute = tokenRatePerMinute
+    }
 }
 
 private struct PendingHistorySample: Sendable {
@@ -26,20 +70,33 @@ private struct PendingHistorySample: Sendable {
     let remainingPercent: Double?
     let windowMinutes: Int
     let resetsAt: Date?
+    let fiveHourRemainingPercent: Double?
+    let fiveHourWindowMinutes: Int
+    let fiveHourResetsAt: Date?
 }
 
-/// Persistent, privacy-minimal history storage.  The on-disk header and
-/// 96-byte records are deliberately compatible with the original v1.5.0
-/// Windows dashboard.  No prompt text, message text, project path, or session
-/// name is ever written here.
+/// Persistent, privacy-minimal history storage.  New 104-byte v4 records add
+/// the 5H quota without modifying any existing v3 files; both formats remain
+/// readable.  No prompt text, message text, project path, or session name is
+/// ever written here.
 final class HistoryStore: @unchecked Sendable {
     static let maximumFileBytes: Int64 = 8 * 1024 * 1024
-    static let recordSize = 96
+    static let recordSize = 104
     private static let headerSize = 16
-    private static let formatVersion: Int32 = 3
     private static let compactTargetBytes: Int64 = 7 * 1024 * 1024
-    private static let magic = Data("CLDHST03".utf8)
     private static let dotNetUnixEpochTicks: Int64 = 621_355_968_000_000_000
+
+    private struct FileFormat: Equatable {
+        let magic: Data
+        let version: Int32
+        let recordSize: Int
+
+        static let legacyV3 = FileFormat(magic: Data("CLDHST03".utf8), version: 3, recordSize: 96)
+        static let currentV4 = FileFormat(magic: Data("CLDHST04".utf8), version: 4, recordSize: HistoryStore.recordSize)
+    }
+
+    private static let currentFormat = FileFormat.currentV4
+    private static let supportedFormats = [FileFormat.legacyV3, FileFormat.currentV4]
 
     private let lock = NSLock()
     private let fileManager = FileManager.default
@@ -87,13 +144,17 @@ final class HistoryStore: @unchecked Sendable {
         }
         if pendingFiveMinuteBucket == nil { pendingFiveMinuteBucket = fiveMinuteBucket }
 
-        let quota = snapshot.primaryQuota
+        let weeklyQuota = snapshot.weeklyQuota
+        let fiveHourQuota = snapshot.fiveHourQuota
         pending.append(PendingHistorySample(
             at: pointAt,
             totals: snapshot.today,
-            remainingPercent: quota?.remainingPercent,
-            windowMinutes: quota?.windowMinutes ?? 0,
-            resetsAt: quota?.resetsAt
+            remainingPercent: weeklyQuota?.remainingPercent,
+            windowMinutes: weeklyQuota?.windowMinutes ?? 0,
+            resetsAt: weeklyQuota?.resetsAt,
+            fiveHourRemainingPercent: fiveHourQuota?.remainingPercent,
+            fiveHourWindowMinutes: fiveHourQuota?.windowMinutes ?? 0,
+            fiveHourResetsAt: fiveHourQuota?.resetsAt
         ))
     }
 
@@ -186,9 +247,9 @@ final class HistoryStore: @unchecked Sendable {
     private func ensureFile() throws {
         try fileManager.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
         guard fileManager.fileExists(atPath: storagePath.path) else {
-            var header = Self.magic
-            header.appendLittleEndian(Self.formatVersion)
-            header.appendLittleEndian(Int32(Self.recordSize))
+            var header = Self.currentFormat.magic
+            header.appendLittleEndian(Self.currentFormat.version)
+            header.appendLittleEndian(Int32(Self.currentFormat.recordSize))
             try header.write(to: storagePath, options: .atomic)
             return
         }
@@ -196,8 +257,9 @@ final class HistoryStore: @unchecked Sendable {
         let handle = try FileHandle(forUpdating: storagePath)
         defer { try? handle.close() }
         let data = try handle.readToEnd() ?? Data()
-        guard Self.hasValidHeader(data) else { throw HistoryStoreError.invalidHeader }
-        let completeLength = Self.headerSize + max(0, (data.count - Self.headerSize) / Self.recordSize) * Self.recordSize
+        guard Self.fileFormat(of: data) == Self.currentFormat else { throw HistoryStoreError.invalidHeader }
+        let recordSize = Self.currentFormat.recordSize
+        let completeLength = Self.headerSize + max(0, (data.count - Self.headerSize) / recordSize) * recordSize
         if data.count != completeLength {
             try handle.truncate(atOffset: UInt64(completeLength))
             try handle.synchronize()
@@ -206,9 +268,9 @@ final class HistoryStore: @unchecked Sendable {
 
     private func readLastSample(at path: URL) throws -> HistorySample? {
         let data = try Data(contentsOf: path, options: .mappedIfSafe)
-        guard Self.hasValidHeader(data), data.count >= Self.headerSize + Self.recordSize else { return nil }
-        let offset = Self.headerSize + ((data.count - Self.headerSize) / Self.recordSize - 1) * Self.recordSize
-        return Self.decode(data.subdata(in: offset..<(offset + Self.recordSize)))
+        guard let format = Self.fileFormat(of: data), data.count >= Self.headerSize + format.recordSize else { return nil }
+        let offset = Self.headerSize + ((data.count - Self.headerSize) / format.recordSize - 1) * format.recordSize
+        return Self.decode(data.subdata(in: offset..<(offset + format.recordSize)), format: format)
     }
 
     private func readAllFiles(cancellationCheck: () -> Bool) throws -> [HistorySample] {
@@ -225,15 +287,15 @@ final class HistoryStore: @unchecked Sendable {
     private static func readFile(_ path: URL, cancellationCheck: () -> Bool) throws -> [HistorySample] {
         guard FileManager.default.fileExists(atPath: path.path) else { return [] }
         let data = try Data(contentsOf: path, options: .mappedIfSafe)
-        guard hasValidHeader(data) else { return [] }
+        guard let format = fileFormat(of: data) else { return [] }
         var output = [HistorySample]()
         var offset = headerSize
-        while offset + recordSize <= data.count {
+        while offset + format.recordSize <= data.count {
             if cancellationCheck() { throw CancellationError() }
-            if let sample = decode(data.subdata(in: offset..<(offset + recordSize))) {
+            if let sample = decode(data.subdata(in: offset..<(offset + format.recordSize)), format: format) {
                 output.append(sample)
             }
-            offset += recordSize
+            offset += format.recordSize
         }
         return output.sorted { $0.at < $1.at }
     }
@@ -263,9 +325,9 @@ final class HistoryStore: @unchecked Sendable {
 
         let temporary = storagePath.appendingPathExtension("tmp")
         defer { try? fileManager.removeItem(at: temporary) }
-        var output = Self.magic
-        output.appendLittleEndian(Self.formatVersion)
-        output.appendLittleEndian(Int32(Self.recordSize))
+        var output = Self.currentFormat.magic
+        output.appendLittleEndian(Self.currentFormat.version)
+        output.appendLittleEndian(Int32(Self.currentFormat.recordSize))
         for sample in selected { output.append(Self.encode(sample)) }
         try output.write(to: temporary, options: .atomic)
         _ = try fileManager.replaceItemAt(storagePath, withItemAt: temporary)
@@ -310,12 +372,16 @@ final class HistoryStore: @unchecked Sendable {
             remainingPercent: value.remainingPercent,
             windowMinutes: value.windowMinutes,
             resetsAt: value.resetsAt,
+            fiveHourRemainingPercent: value.fiveHourRemainingPercent,
+            fiveHourWindowMinutes: value.fiveHourWindowMinutes,
+            fiveHourResetsAt: value.fiveHourResetsAt,
             tokenRatePerMinute: rate
         )
     }
 
     private static func merge(_ first: HistorySample, _ second: HistorySample) -> HistorySample {
-        let hasQuota = second.remainingPercent != nil
+        let hasWeeklyQuota = second.remainingPercent != nil
+        let hasFiveHourQuota = second.fiveHourRemainingPercent != nil
         return HistorySample(
             at: second.at,
             deltaInput: first.deltaInput &+ second.deltaInput,
@@ -328,8 +394,11 @@ final class HistoryStore: @unchecked Sendable {
             sourceReasoning: second.sourceReasoning,
             isBaseline: first.isBaseline && second.isBaseline,
             remainingPercent: second.remainingPercent ?? first.remainingPercent,
-            windowMinutes: hasQuota ? second.windowMinutes : first.windowMinutes,
-            resetsAt: hasQuota ? second.resetsAt : first.resetsAt,
+            windowMinutes: hasWeeklyQuota ? second.windowMinutes : first.windowMinutes,
+            resetsAt: hasWeeklyQuota ? second.resetsAt : first.resetsAt,
+            fiveHourRemainingPercent: second.fiveHourRemainingPercent ?? first.fiveHourRemainingPercent,
+            fiveHourWindowMinutes: hasFiveHourQuota ? second.fiveHourWindowMinutes : first.fiveHourWindowMinutes,
+            fiveHourResetsAt: hasFiveHourQuota ? second.fiveHourResetsAt : first.fiveHourResetsAt,
             tokenRatePerMinute: second.tokenRatePerMinute ?? first.tokenRatePerMinute
         )
     }
@@ -349,22 +418,27 @@ final class HistoryStore: @unchecked Sendable {
         var flags: Int32 = sample.isBaseline ? 1 : 0
         if sample.remainingPercent != nil { flags |= 2 }
         if sample.tokenRatePerMinute != nil { flags |= 4 }
+        if sample.fiveHourRemainingPercent != nil { flags |= 8 }
         data.appendLittleEndian(flags)
         data.appendLittleEndian(Int32(30))
-        let quota = UInt16(max(0, min(10_000, Int(((sample.remainingPercent ?? 0) * 100).rounded()))))
-        data.appendLittleEndian(quota)
+        let weeklyQuota = UInt16(max(0, min(10_000, Int(((sample.remainingPercent ?? 0) * 100).rounded()))))
+        data.appendLittleEndian(weeklyQuota)
         data.appendLittleEndian(UInt16(max(0, min(Int(UInt16.max), sample.remainingPercent == nil ? 0 : sample.windowMinutes))))
         data.appendLittleEndian(unixSeconds(for: sample.resetsAt))
         data.appendLittleEndian(Float(sample.tokenRatePerMinute ?? 0).bitPattern)
+        let fiveHourQuota = UInt16(max(0, min(10_000, Int(((sample.fiveHourRemainingPercent ?? 0) * 100).rounded()))))
+        data.appendLittleEndian(fiveHourQuota)
+        data.appendLittleEndian(UInt16(max(0, min(Int(UInt16.max), sample.fiveHourRemainingPercent == nil ? 0 : sample.fiveHourWindowMinutes))))
+        data.appendLittleEndian(unixSeconds(for: sample.fiveHourResetsAt))
         data.appendLittleEndian(checksum(data))
-        precondition(data.count == recordSize)
+        precondition(data.count == currentFormat.recordSize)
         return data
     }
 
-    private static func decode(_ data: Data) -> HistorySample? {
-        guard data.count == recordSize,
-              let expected: UInt32 = data.readLittleEndian(at: recordSize - 4),
-              expected == checksum(data.prefix(recordSize - 4))
+    private static func decode(_ data: Data, format: FileFormat) -> HistorySample? {
+        guard data.count == format.recordSize,
+              let expected: UInt32 = data.readLittleEndian(at: format.recordSize - 4),
+              expected == checksum(data.prefix(format.recordSize - 4))
         else { return nil }
 
         var offset = 0
@@ -397,11 +471,55 @@ final class HistoryStore: @unchecked Sendable {
         guard let resetSeconds: UInt32 = data.readLittleEndian(at: offset) else { return nil }
         offset += 4
         guard let rateBits: UInt32 = data.readLittleEndian(at: offset) else { return nil }
+        offset += 4
+
+        let hasFiveHourQuota = flags & 8 != 0
+        let fiveHourBasisPoints: UInt16
+        let fiveHourWindow: UInt16
+        let fiveHourResetSeconds: UInt32
+        if format == .currentV4 {
+            guard let basisPoints: UInt16 = data.readLittleEndian(at: offset) else { return nil }
+            offset += 2
+            guard let window: UInt16 = data.readLittleEndian(at: offset) else { return nil }
+            offset += 2
+            guard let resetSeconds: UInt32 = data.readLittleEndian(at: offset) else { return nil }
+            fiveHourBasisPoints = basisPoints
+            fiveHourWindow = window
+            fiveHourResetSeconds = resetSeconds
+        } else {
+            fiveHourBasisPoints = 0
+            fiveHourWindow = 0
+            fiveHourResetSeconds = 0
+        }
 
         let seconds = Double(ticks - dotNetUnixEpochTicks) / 10_000_000
         guard seconds.isFinite, abs(seconds) < 315_537_897_600 else { return nil }
         let hasQuota = flags & 2 != 0
         let hasRate = flags & 4 != 0
+        let legacyShortQuota = format == .legacyV3 && hasQuota && Int(window) > 0 && Int(window) < 24 * 60
+        let weeklyRemaining = hasQuota && !legacyShortQuota ? Double(basisPoints) / 100 : nil
+        let weeklyWindow = weeklyRemaining == nil ? 0 : Int(window)
+        let weeklyReset = weeklyRemaining != nil && resetSeconds != 0
+            ? Date(timeIntervalSince1970: TimeInterval(resetSeconds))
+            : nil
+        let fiveHourRemaining: Double?
+        let fiveHourMinutes: Int
+        let fiveHourReset: Date?
+        if legacyShortQuota {
+            fiveHourRemaining = Double(basisPoints) / 100
+            fiveHourMinutes = Int(window)
+            fiveHourReset = resetSeconds != 0 ? Date(timeIntervalSince1970: TimeInterval(resetSeconds)) : nil
+        } else if hasFiveHourQuota && format == .currentV4 {
+            fiveHourRemaining = Double(fiveHourBasisPoints) / 100
+            fiveHourMinutes = Int(fiveHourWindow)
+            fiveHourReset = fiveHourResetSeconds != 0
+                ? Date(timeIntervalSince1970: TimeInterval(fiveHourResetSeconds))
+                : nil
+        } else {
+            fiveHourRemaining = nil
+            fiveHourMinutes = 0
+            fiveHourReset = nil
+        }
         return HistorySample(
             at: Date(timeIntervalSince1970: seconds),
             deltaInput: deltaInput,
@@ -413,18 +531,25 @@ final class HistoryStore: @unchecked Sendable {
             sourceCached: sourceCached,
             sourceReasoning: sourceReasoning,
             isBaseline: flags & 1 != 0,
-            remainingPercent: hasQuota ? Double(basisPoints) / 100 : nil,
-            windowMinutes: hasQuota ? Int(window) : 0,
-            resetsAt: hasQuota && resetSeconds != 0 ? Date(timeIntervalSince1970: TimeInterval(resetSeconds)) : nil,
+            remainingPercent: weeklyRemaining,
+            windowMinutes: weeklyWindow,
+            resetsAt: weeklyReset,
+            fiveHourRemainingPercent: fiveHourRemaining,
+            fiveHourWindowMinutes: fiveHourMinutes,
+            fiveHourResetsAt: fiveHourReset,
             tokenRatePerMinute: hasRate ? Double(Float(bitPattern: rateBits)) : nil
         )
     }
 
-    private static func hasValidHeader(_ data: Data) -> Bool {
-        guard data.count >= headerSize, data.prefix(magic.count) == magic else { return false }
+    private static func fileFormat(of data: Data) -> FileFormat? {
+        guard data.count >= headerSize else { return nil }
         let version: Int32? = data.readLittleEndian(at: 8)
         let size: Int32? = data.readLittleEndian(at: 12)
-        return version == formatVersion && size == Int32(recordSize)
+        return supportedFormats.first {
+            data.prefix($0.magic.count) == $0.magic &&
+                version == $0.version &&
+                size == Int32($0.recordSize)
+        }
     }
 
     private static func checksum(_ data: some DataProtocol) -> UInt32 {
@@ -462,7 +587,7 @@ final class HistoryStore: @unchecked Sendable {
 
     static func resolveStoragePath(in folder: URL, today: Date = Date()) -> URL {
         let prefix = "codex-usage-history-from"
-        let suffix = "-v1.5.0.bin"
+        let suffix = "-v1.5.0-v4.bin"
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -471,12 +596,8 @@ final class HistoryStore: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: folder.path) else { return preferred }
 
         let candidates = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-        let compatible = candidates.filter {
-            $0.lastPathComponent.hasPrefix(prefix) &&
-                $0.lastPathComponent.contains("-v1.5.0") &&
-                Self.isCompatibleFile($0)
-        }.sorted { $0.path < $1.path }
-        if let compatible = compatible.first { return compatible }
+        let existingV4 = candidates.filter { Self.fileFormat(at: $0) == .currentV4 }.sorted { $0.path < $1.path }
+        if let existingV4 = existingV4.first { return existingV4 }
         guard FileManager.default.fileExists(atPath: preferred.path) else { return preferred }
 
         var index = 2
@@ -497,16 +618,20 @@ final class HistoryStore: @unchecked Sendable {
         }
         if !readable.contains(storagePath) { readable.append(storagePath) }
         return Array(Set(readable)).sorted {
-            let leftCurrent = $0.lastPathComponent.contains("codex-usage-history-from")
-            let rightCurrent = $1.lastPathComponent.contains("codex-usage-history-from")
-            if leftCurrent != rightCurrent { return !leftCurrent }
+            let leftPriority = Self.fileFormat(at: $0) == .currentV4 ? 1 : 0
+            let rightPriority = Self.fileFormat(at: $1) == .currentV4 ? 1 : 0
+            if leftPriority != rightPriority { return leftPriority < rightPriority }
             return $0.path < $1.path
         }
     }
 
     private static func isCompatibleFile(_ path: URL) -> Bool {
-        guard let data = try? Data(contentsOf: path, options: .mappedIfSafe) else { return false }
-        return hasValidHeader(data)
+        fileFormat(at: path) != nil
+    }
+
+    private static func fileFormat(at path: URL) -> FileFormat? {
+        guard let data = try? Data(contentsOf: path, options: .mappedIfSafe) else { return nil }
+        return fileFormat(of: data)
     }
 }
 

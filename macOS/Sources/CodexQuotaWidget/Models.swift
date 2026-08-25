@@ -112,8 +112,27 @@ struct UsageSnapshot: Equatable, Sendable {
         projects: []
     )
 
+    /// Codex currently reports the short rolling 5H window alongside the
+    /// longer weekly window.  Keep the selection explicit instead of relying
+    /// on source order or assuming the shortest window is the only quota.
+    var fiveHourQuota: QuotaWindow? {
+        let shortWindows = quotas.filter { $0.windowMinutes > 0 && $0.windowMinutes < 24 * 60 }
+        return shortWindows.min {
+            abs($0.windowMinutes - 5 * 60) < abs($1.windowMinutes - 5 * 60)
+        }
+    }
+
+    var weeklyQuota: QuotaWindow? {
+        let longWindows = quotas.filter { $0.windowMinutes >= 24 * 60 }
+        return longWindows.min {
+            abs($0.windowMinutes - 7 * 24 * 60) < abs($1.windowMinutes - 7 * 24 * 60)
+        }
+    }
+
+    /// Compatibility accessor for callers that only need one visible quota.
+    /// New dashboard code should use `fiveHourQuota` and `weeklyQuota`.
     var primaryQuota: QuotaWindow? {
-        quotas.min { $0.windowMinutes < $1.windowMinutes }
+        fiveHourQuota ?? weeklyQuota ?? quotas.min { $0.windowMinutes < $1.windowMinutes }
     }
 }
 

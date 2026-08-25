@@ -230,6 +230,11 @@ final class DashboardViewModel: ObservableObject {
         historyChartSnapshot = historyChart.renderSnapshot(now: chartEnd(for: historySelectedDate))
     }
 
+    var fiveHourQuota: QuotaWindow? { snapshot.fiveHourQuota }
+    var weeklyQuota: QuotaWindow? { snapshot.weeklyQuota }
+
+    /// Retained for the menu-bar compatibility surface.  Dashboard content
+    /// must use the two explicit quota accessors above.
     var primaryQuota: QuotaWindow? { snapshot.primaryQuota }
 
     var displayedProjects: [ProjectUsage] {
@@ -294,9 +299,12 @@ final class DashboardViewModel: ObservableObject {
         liveChart.capture(
             capturedAt: capturedAt,
             cumulativeTokens: snapshot.today.total,
-            remainingPercent: snapshot.primaryQuota?.remainingPercent,
-            windowMinutes: snapshot.primaryQuota?.windowMinutes ?? 0,
-            resetsAt: snapshot.primaryQuota?.resetsAt
+            weeklyRemainingPercent: snapshot.weeklyQuota?.remainingPercent,
+            weeklyWindowMinutes: snapshot.weeklyQuota?.windowMinutes ?? 0,
+            weeklyResetsAt: snapshot.weeklyQuota?.resetsAt,
+            fiveHourRemainingPercent: snapshot.fiveHourQuota?.remainingPercent,
+            fiveHourWindowMinutes: snapshot.fiveHourQuota?.windowMinutes ?? 0,
+            fiveHourResetsAt: snapshot.fiveHourQuota?.resetsAt
         )
         liveChartSnapshot = liveChart.renderSnapshot(now: capturedAt)
         secondsRemaining = TokenRateChart.captureIntervalSeconds
