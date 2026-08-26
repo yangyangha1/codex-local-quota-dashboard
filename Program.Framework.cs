@@ -2126,6 +2126,10 @@ namespace CodexLocalDashboard
         {
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             using (var brush = new SolidBrush(ForeColor))
+            using (var fiveHourBrush = new SolidBrush(
+                Color.FromArgb(242, 125, 43)))
+            using (var weeklyBrush = new SolidBrush(
+                Color.FromArgb(75, 205, 143)))
             {
                 if (!fiveHourRemaining.HasValue && !weeklyRemaining.HasValue)
                 {
@@ -2139,28 +2143,21 @@ namespace CodexLocalDashboard
                     return;
                 }
 
-                using (var tagFont = new Font(Font.FontFamily,
-                    Math.Max(5.5f, Font.Size * .5f), FontStyle.Bold,
-                    GraphicsUnit.Point))
+                float x = bounds.Left;
+                DrawBase(graphics, brush, "GPT·", ref x, bounds);
+                if (fiveHourRemaining.HasValue)
                 {
-                    float x = bounds.Left;
-                    DrawBase(graphics, brush, "GPT·", ref x, bounds);
+                    DrawBase(graphics, fiveHourBrush,
+                        fiveHourRemaining.Value.ToString("0") + "%",
+                        ref x, bounds);
+                }
+                if (weeklyRemaining.HasValue)
+                {
                     if (fiveHourRemaining.HasValue)
-                    {
-                        DrawBase(graphics, brush,
-                            fiveHourRemaining.Value.ToString("0") + "%",
-                            ref x, bounds);
-                        DrawTag(graphics, brush, tagFont, "5H", ref x, bounds);
-                    }
-                    if (weeklyRemaining.HasValue)
-                    {
-                        if (fiveHourRemaining.HasValue)
-                            DrawBase(graphics, brush, "/", ref x, bounds);
-                        DrawBase(graphics, brush,
-                            weeklyRemaining.Value.ToString("0") + "%",
-                            ref x, bounds);
-                        DrawTag(graphics, brush, tagFont, "周", ref x, bounds);
-                    }
+                        DrawBase(graphics, brush, " / ", ref x, bounds);
+                    DrawBase(graphics, weeklyBrush,
+                        weeklyRemaining.Value.ToString("0") + "%",
+                        ref x, bounds);
                 }
             }
         }
@@ -2174,14 +2171,6 @@ namespace CodexLocalDashboard
             x += size.Width;
         }
 
-        private static void DrawTag(Graphics graphics, Brush brush, Font font,
-            string text, ref float x, Rectangle bounds)
-        {
-            var size = graphics.MeasureString(text, font);
-            graphics.DrawString(text, font, brush, new PointF(x,
-                bounds.Bottom - font.Height));
-            x += size.Width;
-        }
     }
 
     internal sealed class QuotaProgressBar : Control

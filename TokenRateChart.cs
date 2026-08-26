@@ -1704,12 +1704,6 @@ namespace CodexLocalDashboard
             float geometryScale)
         {
             var gap = Math.Max(2f, 3f * geometryScale);
-            var rateWidth = Math.Min(bounds.Width * .28f, Math.Max(28f,
-                graphics.MeasureString(rateText, font).Width));
-            var rateLeft = bounds.Left + (bounds.Width - rateWidth) / 2f;
-            var summaryWidth = Math.Max(1f, rateLeft - bounds.Left - gap);
-            var cumulativeLeft = rateLeft + rateWidth + gap;
-            var cumulativeWidth = Math.Max(1f, bounds.Right - cumulativeLeft);
             var prefixMeasured = Math.Max(1f,
                 graphics.MeasureString(prefixText, font).Width);
             var weeklyMeasured = Math.Max(1f,
@@ -1720,6 +1714,32 @@ namespace CodexLocalDashboard
                 Math.Max(1f, graphics.MeasureString(separatorText, font).Width);
             var summaryMeasured = prefixMeasured + weeklyMeasured +
                 separatorMeasured + fiveHourMeasured;
+            var rateMeasured = string.IsNullOrEmpty(rateText) ? 0f :
+                Math.Max(1f, graphics.MeasureString(rateText, font).Width);
+            var cumulativeMeasured = Math.Max(1f,
+                graphics.MeasureString(cumulativeText, font).Width);
+            var available = Math.Max(1f, bounds.Width - gap * 2f);
+            var summaryWidth = summaryMeasured;
+            var cumulativeWidth = cumulativeMeasured;
+            var rateWidth = rateMeasured;
+            var requested = summaryWidth + cumulativeWidth + rateWidth;
+            if (requested > available)
+            {
+                // Keep the rate readable and shrink the two outer regions in
+                // proportion, so it remains centered in the actual free gap.
+                rateWidth = Math.Min(rateMeasured, available * .30f);
+                var sideAvailable = Math.Max(2f, available - rateWidth);
+                var sideRequested = Math.Max(1f,
+                    summaryMeasured + cumulativeMeasured);
+                var sideScale = Math.Min(1f, sideAvailable / sideRequested);
+                summaryWidth = Math.Max(1f, summaryMeasured * sideScale);
+                cumulativeWidth = Math.Max(1f,
+                    sideAvailable - summaryWidth);
+            }
+            var rateLeft = bounds.Left + summaryWidth + gap;
+            var rateAreaWidth = Math.Max(1f, bounds.Right - cumulativeWidth -
+                gap - rateLeft);
+            var cumulativeLeft = bounds.Right - cumulativeWidth;
             var scale = summaryMeasured > summaryWidth
                 ? summaryWidth / summaryMeasured : 1f;
             var prefixWidth = prefixMeasured * scale;
@@ -1744,8 +1764,8 @@ namespace CodexLocalDashboard
                 new RectangleF(x, bounds.Top, fiveHourWidth,
                     headerHeight), StringAlignment.Near);
             DrawHeaderText(graphics, rateText, font, rateBrush,
-                new RectangleF(rateLeft, bounds.Top,
-                    rateWidth, headerHeight), StringAlignment.Center);
+                new RectangleF(rateLeft, bounds.Top, rateAreaWidth,
+                    headerHeight), StringAlignment.Center);
             DrawHeaderText(graphics, cumulativeText, font, cumulativeBrush,
                 new RectangleF(cumulativeLeft, bounds.Top,
                     cumulativeWidth, headerHeight), StringAlignment.Far);

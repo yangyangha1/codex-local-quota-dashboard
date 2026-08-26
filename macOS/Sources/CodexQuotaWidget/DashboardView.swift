@@ -13,9 +13,6 @@ struct DashboardView: View {
     private var quotaHeadlineFont: Font {
         Font(NSFont(name: "PingFangSC-Semibold", size: 21) ?? NSFont.systemFont(ofSize: 21, weight: .semibold))
     }
-    private var quotaHeadlineTagFont: Font {
-        Font(NSFont(name: "PingFangSC-Semibold", size: 10.5) ?? NSFont.systemFont(ofSize: 10.5, weight: .semibold))
-    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -87,25 +84,25 @@ struct DashboardView: View {
     private var quotaHeadline: some View {
         switch (model.fiveHourQuota, model.weeklyQuota) {
         case let (fiveHour?, weekly?):
-            HStack(alignment: .bottom, spacing: 0) {
-                Text("GPT·\(wholePercent(fiveHour.remainingPercent))%")
-                    .font(quotaHeadlineFont)
-                Text("5H").font(quotaHeadlineTagFont)
-                Text("/\(wholePercent(weekly.remainingPercent))%")
-                    .font(quotaHeadlineFont)
-                Text("周").font(quotaHeadlineTagFont)
+            HStack(spacing: 0) {
+                Text("GPT·").font(quotaHeadlineFont)
+                Text("\(wholePercent(fiveHour.remainingPercent))%")
+                    .font(quotaHeadlineFont).foregroundStyle(fiveHourQuotaSeriesColor)
+                Text(" / ").font(quotaHeadlineFont)
+                Text("\(wholePercent(weekly.remainingPercent))%")
+                    .font(quotaHeadlineFont).foregroundStyle(quotaSeriesColor)
             }
         case let (fiveHour?, nil):
-            HStack(alignment: .bottom, spacing: 0) {
-                Text("GPT·\(wholePercent(fiveHour.remainingPercent))%")
-                    .font(quotaHeadlineFont)
-                Text("5H").font(quotaHeadlineTagFont)
+            HStack(spacing: 0) {
+                Text("GPT·").font(quotaHeadlineFont)
+                Text("\(wholePercent(fiveHour.remainingPercent))%")
+                    .font(quotaHeadlineFont).foregroundStyle(fiveHourQuotaSeriesColor)
             }
         case let (nil, weekly?):
-            HStack(alignment: .bottom, spacing: 0) {
-                Text("GPT·\(wholePercent(weekly.remainingPercent))%")
-                    .font(quotaHeadlineFont)
-                Text("周").font(quotaHeadlineTagFont)
+            HStack(spacing: 0) {
+                Text("GPT·").font(quotaHeadlineFont)
+                Text("\(wholePercent(weekly.remainingPercent))%")
+                    .font(quotaHeadlineFont).foregroundStyle(quotaSeriesColor)
             }
         case (nil, nil):
             Text("GPT·暂无缓存").font(quotaHeadlineFont)
@@ -453,22 +450,22 @@ private struct ChartInfoLine: View {
     let snapshot: ChartRenderSnapshot
 
     var body: some View {
-        GeometryReader { geometry in
-            let columnWidth = geometry.size.width / 3
-            HStack(spacing: 0) {
-                quotaSummary
-                    .frame(width: columnWidth, alignment: .leading)
-                Text(showsRate ? "速率 \(rateText)" : "")
-                    .foregroundStyle(rateSeriesColor)
-                    .frame(width: columnWidth, alignment: .center)
-                Text("累计 Token \(compactRate(snapshot.cumulativeIncrease))")
-                    .foregroundStyle(cumulativeSeriesColor)
-                    .frame(width: columnWidth, alignment: .trailing)
-            }
-            .lineLimit(1)
-            .minimumScaleFactor(0.55)
+        HStack(spacing: 0) {
+            quotaSummary
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
+                .layoutPriority(1)
+            Text(showsRate ? "速率 \(rateText)" : "")
+                .foregroundStyle(rateSeriesColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
+                .frame(maxWidth: .infinity, alignment: .center)
+            Text("累计 Token \(compactRate(snapshot.cumulativeIncrease))")
+                .foregroundStyle(cumulativeSeriesColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
+                .layoutPriority(1)
         }
-        .frame(height: 14)
         .font(.system(size: 10, weight: .semibold))
         .monospacedDigit()
     }
