@@ -475,13 +475,13 @@ private struct ChartInfoLine: View {
         HStack(spacing: 0) {
             Text("\(durationText)消耗")
                 .foregroundStyle(rateSeriesColor)
-            Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
-                .foregroundStyle(quotaSeriesColor)
             if snapshot.currentFiveHourQuota != nil {
-                Text("/").foregroundStyle(rateSeriesColor)
                 Text("5H \(wholePercent(snapshot.fiveHourQuotaConsumedDuringRuntime))%")
                     .foregroundStyle(fiveHourQuotaSeriesColor)
+                Text("/").foregroundStyle(rateSeriesColor)
             }
+            Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
+                .foregroundStyle(quotaSeriesColor)
         }
     }
 
