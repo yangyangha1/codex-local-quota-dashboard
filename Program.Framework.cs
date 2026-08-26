@@ -2340,8 +2340,9 @@ namespace CodexLocalDashboard
 
         private static string QuotaResetSummary(UsageSnapshot data)
         {
-            return "5H重置 " + ResetText(data.FiveHourQuota) + " · 周重置 " +
-                ResetText(data.WeeklyQuota);
+            // The compact Windows top strip is intentionally 5H-focused.
+            // The full dashboard retains both reset times below its quota bar.
+            return "5H重置 " + ResetText(data.FiveHourQuota);
         }
 
         private static string ResetText(QuotaWindow quota)
