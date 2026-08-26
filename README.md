@@ -55,7 +55,7 @@ cd macOS
 **桌面仪表盘**
 
 <p align="center">
-  <img src="docs/images/dashboard.jpg" width="520" alt="Codex Local Quota Dashboard desktop dashboard">
+  <img src="docs/images/dashboard.png" width="520" alt="Codex Local Quota Dashboard desktop dashboard">
 </p>
 
 **Codex 顶部横条（仅 Windows）**
