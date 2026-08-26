@@ -245,8 +245,8 @@ namespace CodexLocalDashboard
             if (!IsHandleCreated) return;
             try
             {
-                var cornerPreference = !stripMode &&
-                    Environment.OSVersion.Version.Build >= 22000 ? 2 : 1;
+                var cornerPreference = Environment.OSVersion.Version.Build >=
+                    22000 ? 2 : 1;
                 DwmSetWindowAttribute(Handle, 33, ref cornerPreference,
                     sizeof(int));
             }
@@ -598,7 +598,7 @@ namespace CodexLocalDashboard
             quotaValue.SetQuotaValues(fiveHourRemaining, weeklyRemaining);
             quotaBar.SetQuotaValues(weeklyRemaining, fiveHourRemaining);
             quotaSub.Text = "5H重置 " + FormatQuotaReset(fiveHourQuota) +
-                " · 周重置 " + FormatQuotaReset(weeklyQuota);
+                " · 7d重置 " + FormatQuotaReset(weeklyQuota);
             tips.SetToolTip(quotaTitle, string.Join("\n", s.Quotas.OrderBy(x => x.WindowMinutes).Select(x => Ui.WindowName(x.WindowMinutes) + "：已用 " + x.UsedPercent.ToString("0.#") + "%")));
             RenderLayeredSurface();
         }
@@ -891,13 +891,9 @@ namespace CodexLocalDashboard
                 using (var backgroundLayer = new SolidBrush(
                     Color.FromArgb(BackgroundAlpha, layeredBackground)))
                 {
-                    if (stripMode)
-                        graphics.FillRectangle(backgroundLayer, 0, 0,
-                            bitmap.Width, bitmap.Height);
-                    else
-                        FillHighQualityRoundedBackground(graphics,
-                            new RectangleF(0, 0, bitmap.Width, bitmap.Height),
-                            Math.Max(6f, 9f * dpiScale), backgroundLayer);
+                    FillHighQualityRoundedBackground(graphics,
+                        new RectangleF(0, 0, bitmap.Width, bitmap.Height),
+                        Math.Max(6f, 9f * dpiScale), backgroundLayer);
                 }
                 if (stripMode)
                 {
@@ -2415,12 +2411,12 @@ namespace CodexLocalDashboard
             var fiveHour = Remaining(data.FiveHourQuota);
             var weekly = Remaining(data.WeeklyQuota);
             if (fiveHour.HasValue && weekly.HasValue)
-                return string.Format("5H {0:0.#}% / 周 {1:0.#}%",
+                return string.Format("5H {0:0.#}% / 7d {1:0.#}%",
                     fiveHour.Value, weekly.Value);
             if (fiveHour.HasValue)
                 return string.Format("5H {0:0.#}%", fiveHour.Value);
             if (weekly.HasValue)
-                return string.Format("周 {0:0.#}%", weekly.Value);
+                return string.Format("7d {0:0.#}%", weekly.Value);
             return "等待本地限额快照";
         }
 

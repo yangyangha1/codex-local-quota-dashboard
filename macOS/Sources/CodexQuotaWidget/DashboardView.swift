@@ -113,7 +113,7 @@ struct DashboardView: View {
         guard model.fiveHourQuota != nil || model.weeklyQuota != nil else {
             return model.isRefreshing ? "正在扫描本地日志" : "等待 Codex 写入限额信息"
         }
-        return "5H重置 \(resetText(for: model.fiveHourQuota)) · 周重置 \(resetText(for: model.weeklyQuota))"
+        return "5H重置 \(resetText(for: model.fiveHourQuota)) · 7d重置 \(resetText(for: model.weeklyQuota))"
     }
 
     private func resetText(for quota: QuotaWindow?) -> String {
@@ -480,7 +480,7 @@ private struct ChartInfoLine: View {
                     .foregroundStyle(fiveHourQuotaSeriesColor)
                 Text("/").foregroundStyle(rateSeriesColor)
             }
-            Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
+            Text("7d\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
                 .foregroundStyle(quotaSeriesColor)
         }
     }

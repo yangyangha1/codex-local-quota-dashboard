@@ -105,7 +105,7 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
             item.state = widget.model.launchAtLoginEnabled ? .on : .off
         }
         if let fiveHourQuota = widget.model.fiveHourQuota, let weeklyQuota = widget.model.weeklyQuota {
-            statusItem.button?.toolTip = "Codex 5H剩余 \(wholePercent(fiveHourQuota.remainingPercent))% · 周剩余 \(wholePercent(weeklyQuota.remainingPercent))%"
+            statusItem.button?.toolTip = "Codex 5H剩余 \(wholePercent(fiveHourQuota.remainingPercent))% · 7d剩余 \(wholePercent(weeklyQuota.remainingPercent))%"
         } else if let quota = widget.model.primaryQuota {
             statusItem.button?.toolTip = "Codex 剩余额度 \(wholePercent(quota.remainingPercent))%"
         } else {
@@ -178,7 +178,7 @@ private struct StatusQuotaPopoverView: View {
                     .lineLimit(1)
                 VStack(alignment: .leading, spacing: 3) {
                     quotaResetLine(title: "5H重置", quota: fiveHourQuota)
-                    quotaResetLine(title: "周重置", quota: weeklyQuota)
+                    quotaResetLine(title: "7d重置", quota: weeklyQuota)
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -200,7 +200,7 @@ private struct StatusQuotaPopoverView: View {
     private var quotaSummary: String {
         let fiveHour = fiveHourQuota.map { wholePercent($0.remainingPercent) } ?? "—"
         let weekly = weeklyQuota.map { wholePercent($0.remainingPercent) } ?? "—"
-        return "5H \(fiveHour)% / 周 \(weekly)%"
+        return "5H \(fiveHour)% / 7d \(weekly)%"
     }
 
     @ViewBuilder
