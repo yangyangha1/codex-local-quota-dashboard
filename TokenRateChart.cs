@@ -60,6 +60,10 @@ namespace CodexLocalDashboard
             new List<HistoryPoint>(5776);
         private readonly List<HistoryPoint> quotaSourcePoints =
             new List<HistoryPoint>(5776);
+        private readonly List<HistoryPoint> fiveHourQuotaPoints =
+            new List<HistoryPoint>(5776);
+        private readonly List<HistoryPoint> fiveHourQuotaSourcePoints =
+            new List<HistoryPoint>(5776);
 
         private byte displayModeValue =
             (byte)UsageChartMode.CumulativeAndQuota;
@@ -98,6 +102,14 @@ namespace CodexLocalDashboard
         private double quotaConsumedDuringRuntime;
         private int quotaWindowMinutes;
         private DateTimeOffset? quotaResetsAt;
+
+        private double? lastFiveHourQuotaRemaining;
+        private DateTimeOffset? lastFiveHourQuotaCalculationAt;
+        private bool breakBeforeNextFiveHourQuotaPoint;
+        private bool hasFiveHourQuotaSource;
+        private double lastFiveHourQuotaSource;
+        private int fiveHourQuotaWindowMinutes;
+        private DateTimeOffset? fiveHourQuotaResetsAt;
 
         public UsageChartMode DisplayMode
         {
@@ -233,7 +245,9 @@ namespace CodexLocalDashboard
                         : sample.SourceInput + sample.SourceOutput;
                     Capture(sample.At, Math.Max(0L, total),
                         sample.RemainingPercent, sample.WindowMinutes,
-                        sample.ResetsAt);
+                        sample.ResetsAt, sample.FiveHourRemainingPercent,
+                        sample.FiveHourWindowMinutes,
+                        sample.FiveHourResetsAt);
                 }
                 historicalSource = true;
             }
@@ -304,6 +318,21 @@ namespace CodexLocalDashboard
         public void Capture(DateTimeOffset capturedAt, long cumulativeTokens,
             double? remainingPercent, int windowMinutes, DateTimeOffset? resetsAt)
         {
+            Capture(capturedAt, cumulativeTokens, remainingPercent,
+                windowMinutes, resetsAt, null, 0, null);
+        }
+
+        /// <summary>
+        /// Captures the independent weekly and rolling 5H quota streams in
+        /// the same sampling pass.  The five-argument overload is retained
+        /// for older callers and treats its quota as the weekly stream.
+        /// </summary>
+        public void Capture(DateTimeOffset capturedAt, long cumulativeTokens,
+            double? weeklyRemainingPercent, int weeklyWindowMinutes,
+            DateTimeOffset? weeklyResetsAt,
+            double? fiveHourRemainingPercent, int fiveHourWindowMinutes,
+            DateTimeOffset? fiveHourResetsAt)
+        {
             lock (gate)
             {
                 PruneLocked(capturedAt);
@@ -325,15 +354,22 @@ namespace CodexLocalDashboard
                     lastQuotaRemaining = null;
                     lastQuotaCalculationAt = null;
                     hasQuotaSource = false;
+                    lastFiveHourQuotaRemaining = null;
+                    lastFiveHourQuotaCalculationAt = null;
+                    hasFiveHourQuotaSource = false;
                     breakBeforeNextTokenPoint = true;
                     breakBeforeNextQuotaPoint = true;
+                    breakBeforeNextFiveHourQuotaPoint = true;
                     breakBeforeNextCounterSample = true;
                 }
                 lastCaptureAt = capturedAt;
 
                 CaptureTokenLocked(capturedAt, cumulativeTokens);
-                CaptureQuotaLocked(capturedAt, remainingPercent, windowMinutes,
-                    resetsAt);
+                CaptureQuotaLocked(capturedAt, weeklyRemainingPercent,
+                    weeklyWindowMinutes, weeklyResetsAt);
+                CaptureFiveHourQuotaLocked(capturedAt,
+                    fiveHourRemainingPercent, fiveHourWindowMinutes,
+                    fiveHourResetsAt);
             }
         }
 
@@ -363,8 +399,12 @@ namespace CodexLocalDashboard
                     lastQuotaRemaining = null;
                     lastQuotaCalculationAt = null;
                     hasQuotaSource = false;
+                    lastFiveHourQuotaRemaining = null;
+                    lastFiveHourQuotaCalculationAt = null;
+                    hasFiveHourQuotaSource = false;
                     breakBeforeNextTokenPoint = true;
                     breakBeforeNextQuotaPoint = true;
+                    breakBeforeNextFiveHourQuotaPoint = true;
                     breakBeforeNextCounterSample = true;
                     lastCaptureAt = capturedAt;
                     return;
@@ -373,6 +413,7 @@ namespace CodexLocalDashboard
                 lastCaptureAt = capturedAt;
                 AppendTokenHoldLocked(capturedAt);
                 AppendQuotaHoldLocked(capturedAt);
+                AppendFiveHourQuotaHoldLocked(capturedAt);
                 PruneRateSamplesLocked(capturedAt);
             }
         }
@@ -636,6 +677,88 @@ namespace CodexLocalDashboard
                 alpha * (rawRemaining - lastQuotaRemaining.Value);
         }
 
+        private void CaptureFiveHourQuotaLocked(DateTimeOffset at,
+            double? remainingPercent, int windowMinutes,
+            DateTimeOffset? resetsAt)
+        {
+            if (!remainingPercent.HasValue || windowMinutes <= 0)
+            {
+                AppendFiveHourQuotaHoldLocked(at);
+                return;
+            }
+            var remaining = remainingPercent.Value;
+            if (double.IsNaN(remaining) || double.IsInfinity(remaining) ||
+                remaining < -0.01d || remaining > 100.01d)
+            {
+                AppendFiveHourQuotaHoldLocked(at);
+                return;
+            }
+            remaining = Math.Max(0d, Math.Min(100d, remaining));
+            if (!hasFiveHourQuotaSource)
+            {
+                StartFiveHourQuotaWindowLocked(at, remaining, windowMinutes,
+                    resetsAt, breakBeforeNextFiveHourQuotaPoint);
+                return;
+            }
+
+            var identityChanged = windowMinutes != fiveHourQuotaWindowMinutes ||
+                !NullableDateEquals(resetsAt, fiveHourQuotaResetsAt);
+            var rise = remaining - lastFiveHourQuotaSource;
+            if (identityChanged || rise > QuotaResetRiseThreshold)
+            {
+                StartFiveHourQuotaWindowLocked(at, remaining, windowMinutes,
+                    resetsAt, true);
+                return;
+            }
+            if (rise > QuotaJitterTolerance)
+            {
+                lastFiveHourQuotaSource = remaining;
+                lastFiveHourQuotaCalculationAt = at;
+                AppendFiveHourQuotaHoldLocked(at);
+                return;
+            }
+
+            lastFiveHourQuotaSource = remaining;
+            AppendFiveHourQuotaSourcePointLocked(at, remaining, false);
+            AppendFiveHourQuotaPointLocked(at,
+                StabilizeFiveHourQuotaLocked(at, remaining), false);
+        }
+
+        private void StartFiveHourQuotaWindowLocked(DateTimeOffset at,
+            double remaining, int windowMinutes, DateTimeOffset? resetsAt,
+            bool breakBefore)
+        {
+            hasFiveHourQuotaSource = true;
+            lastFiveHourQuotaSource = remaining;
+            fiveHourQuotaWindowMinutes = windowMinutes;
+            fiveHourQuotaResetsAt = resetsAt;
+            lastFiveHourQuotaCalculationAt = at;
+            AppendFiveHourQuotaSourcePointLocked(at, remaining,
+                breakBefore || fiveHourQuotaSourcePoints.Count == 0);
+            AppendFiveHourQuotaPointLocked(at, remaining,
+                breakBefore || fiveHourQuotaPoints.Count == 0);
+        }
+
+        private double StabilizeFiveHourQuotaLocked(DateTimeOffset at,
+            double rawRemaining)
+        {
+            if (!lastFiveHourQuotaRemaining.HasValue ||
+                !lastFiveHourQuotaCalculationAt.HasValue ||
+                at <= lastFiveHourQuotaCalculationAt.Value)
+            {
+                lastFiveHourQuotaCalculationAt = at;
+                return rawRemaining;
+            }
+            var elapsedSeconds = (at - lastFiveHourQuotaCalculationAt.Value)
+                .TotalSeconds;
+            var alpha = 1d - Math.Exp(-elapsedSeconds /
+                QuotaSmoothingTime.TotalSeconds);
+            alpha = Math.Max(0.35d, Math.Min(0.80d, alpha));
+            lastFiveHourQuotaCalculationAt = at;
+            return lastFiveHourQuotaRemaining.Value +
+                alpha * (rawRemaining - lastFiveHourQuotaRemaining.Value);
+        }
+
         private void ResetAllLocked(DateTimeOffset? captureAt)
         {
             rateSamples.Clear();
@@ -643,6 +766,8 @@ namespace CodexLocalDashboard
             tokenPoints.Clear();
             quotaPoints.Clear();
             quotaSourcePoints.Clear();
+            fiveHourQuotaPoints.Clear();
+            fiveHourQuotaSourcePoints.Clear();
             lastCaptureAt = captureAt;
             chartOriginAt = captureAt;
             ClearSelectionLocked();
@@ -667,6 +792,14 @@ namespace CodexLocalDashboard
             quotaConsumedDuringRuntime = 0d;
             quotaWindowMinutes = 0;
             quotaResetsAt = null;
+
+            lastFiveHourQuotaRemaining = null;
+            lastFiveHourQuotaCalculationAt = null;
+            breakBeforeNextFiveHourQuotaPoint = false;
+            hasFiveHourQuotaSource = false;
+            lastFiveHourQuotaSource = 0d;
+            fiveHourQuotaWindowMinutes = 0;
+            fiveHourQuotaResetsAt = null;
         }
 
         private void AppendTokenHoldLocked(DateTimeOffset at)
@@ -688,6 +821,14 @@ namespace CodexLocalDashboard
                 return;
             }
             AppendQuotaPointLocked(at, lastQuotaRemaining.Value, false);
+        }
+
+        private void AppendFiveHourQuotaHoldLocked(DateTimeOffset at)
+        {
+            if (!lastFiveHourQuotaRemaining.HasValue) return;
+            if (HasLongGap(fiveHourQuotaPoints, at)) return;
+            AppendFiveHourQuotaPointLocked(at,
+                lastFiveHourQuotaRemaining.Value, false);
         }
 
         private static bool HasLongGap(List<HistoryPoint> points,
@@ -741,6 +882,14 @@ namespace CodexLocalDashboard
             breakBeforeNextQuotaPoint = false;
         }
 
+        private void AppendFiveHourQuotaPointLocked(DateTimeOffset at,
+            double value, bool forceBreakBefore)
+        {
+            AppendContinuousPointLocked(fiveHourQuotaPoints, at, value);
+            lastFiveHourQuotaRemaining = value;
+            breakBeforeNextFiveHourQuotaPoint = false;
+        }
+
         private static void AppendContinuousPointLocked(
             List<HistoryPoint> points, DateTimeOffset at, double value)
         {
@@ -762,6 +911,13 @@ namespace CodexLocalDashboard
             double value, bool breakBefore)
         {
             AppendPointLocked(quotaSourcePoints, at, value, breakBefore);
+        }
+
+        private void AppendFiveHourQuotaSourcePointLocked(DateTimeOffset at,
+            double value, bool breakBefore)
+        {
+            AppendPointLocked(fiveHourQuotaSourcePoints, at, value,
+                breakBefore);
         }
 
         private static void AppendPointLocked(List<HistoryPoint> points,
@@ -828,6 +984,8 @@ namespace CodexLocalDashboard
             PrunePoints(tokenPoints, oldest);
             PrunePoints(quotaPoints, oldest);
             PrunePoints(quotaSourcePoints, oldest);
+            PrunePoints(fiveHourQuotaPoints, oldest);
+            PrunePoints(fiveHourQuotaSourcePoints, oldest);
             PruneCounterSamples(counterHistory, oldest);
             PruneRateSamplesLocked(now);
         }
@@ -875,6 +1033,10 @@ namespace CodexLocalDashboard
                 timelineEnd);
             var selectedQuotaSource = SelectPointsWithBaseline(
                 quotaSourcePoints, timelineStart, timelineEnd);
+            var selectedFiveHourQuota = SelectPoints(fiveHourQuotaPoints,
+                timelineStart, timelineEnd);
+            var selectedFiveHourQuotaSource = SelectPointsWithBaseline(
+                fiveHourQuotaSourcePoints, timelineStart, timelineEnd);
             var cumulativePoints = BuildCumulativePointsLocked(
                 timelineStart, timelineEnd);
 
@@ -882,6 +1044,12 @@ namespace CodexLocalDashboard
                 ? (double?)lastQuotaSource : null;
             if (!currentQuota.HasValue && selectedQuota.Count > 0)
                 currentQuota = selectedQuota[selectedQuota.Count - 1].Value;
+            double? currentFiveHourQuota = hasFiveHourQuotaSource
+                ? (double?)lastFiveHourQuotaSource : null;
+            if (!currentFiveHourQuota.HasValue &&
+                selectedFiveHourQuota.Count > 0)
+                currentFiveHourQuota = selectedFiveHourQuota[
+                    selectedFiveHourQuota.Count - 1].Value;
 
             var cumulativeIncrease = CalculatePeriodIncreaseLocked(
                 timelineStart, timelineEnd);
@@ -905,11 +1073,15 @@ namespace CodexLocalDashboard
             var axisEnd = timelineStart + displayDuration;
 
             return new RenderSnapshot((UsageChartMode)displayModeValue,
-                selectedTokens, selectedQuota, cumulativePoints,
+                selectedTokens, selectedQuota, selectedFiveHourQuota,
+                cumulativePoints,
                 tokenAxisMaximum,
-                cumulativeAxisMaximum, currentQuota, currentRate, peakRate,
+                cumulativeAxisMaximum, currentQuota, currentFiveHourQuota,
+                currentRate, peakRate,
                 cumulativeIncrease,
                 CalculateQuotaConsumption(selectedQuotaSource,
+                    historicalSource),
+                CalculateQuotaConsumption(selectedFiveHourQuotaSource,
                     historicalSource),
                 timelineStart, axisEnd,
                 displayDuration, historicalSource);
@@ -1170,6 +1342,8 @@ namespace CodexLocalDashboard
                 Color.FromArgb(42, 176, 188, 201);
             var quotaColor = light ? Color.FromArgb(27, 151, 101) :
                 Color.FromArgb(75, 205, 143);
+            var fiveHourQuotaColor = light ? Color.FromArgb(211, 104, 27) :
+                Color.FromArgb(242, 125, 43);
             var tokenColor = light ? Color.FromArgb(32, 117, 178) :
                 Color.FromArgb(92, 175, 232);
             var rateBaseColor = muted;
@@ -1192,6 +1366,8 @@ namespace CodexLocalDashboard
             using (var smallFont = new Font(Ui.FontFamilyName,
                 Math.Max(5.5f, 7f * visualScale), FontStyle.Regular))
             using (var quotaBrush = new SolidBrush(quotaColor))
+            using (var fiveHourQuotaBrush =
+                new SolidBrush(fiveHourQuotaColor))
             using (var tokenBrush = new SolidBrush(tokenColor))
             using (var rateBrush = new SolidBrush(rateBaseColor))
             using (var mutedBrush = new SolidBrush(muted))
@@ -1203,11 +1379,17 @@ namespace CodexLocalDashboard
                 bool secondaryDrawn;
                 if (snapshot.Mode == UsageChartMode.CumulativeAndQuota)
                 {
-                    var leftText = "消耗额度 " +
-                            FormatPercent(
-                                snapshot.QuotaConsumedDuringRuntime) + " · " +
-                            ((int)snapshot.DisplayDuration.TotalHours)
-                                .ToString(CultureInfo.InvariantCulture) + "h";
+                    var durationText = ((int)snapshot.DisplayDuration.TotalHours)
+                        .ToString(CultureInfo.InvariantCulture) + "H";
+                    var hasFiveHourQuota = snapshot.CurrentFiveHourQuota.HasValue;
+                    var weeklyConsumptionText = "消耗额度：周" +
+                            FormatPercent(snapshot.QuotaConsumedDuringRuntime) +
+                        (hasFiveHourQuota ? "/" : " · " + durationText);
+                    var fiveHourConsumptionText = hasFiveHourQuota
+                        ? "5H " +
+                            FormatPercent(snapshot.FiveHourQuotaConsumedDuringRuntime) +
+                            " · " + durationText
+                        : string.Empty;
                     var rateText = snapshot.Historical ? string.Empty :
                         snapshot.CurrentTokenRate.HasValue
                         ? "速率 " +
@@ -1216,9 +1398,11 @@ namespace CodexLocalDashboard
                         : "速率 收集中";
                     var rightText = "累计 Token：" +
                         FormatTokenCount(snapshot.CumulativeIncrease);
-                    DrawHeaderTriple(graphics, bounds, headerHeight,
-                        leftText, rateText, rightText, headerFont,
-                        quotaBrush, rateBrush, tokenBrush, geometryScale);
+                    DrawHeaderQuotaSummary(graphics, bounds, headerHeight,
+                        weeklyConsumptionText, fiveHourConsumptionText,
+                        rateText, rightText,
+                        headerFont, quotaBrush, fiveHourQuotaBrush, rateBrush,
+                        tokenBrush, geometryScale);
 
                     var rateDrawn = DrawSeries(graphics, plot,
                         snapshot.TokenPoints, snapshot.TokenAxisMaximum,
@@ -1229,7 +1413,12 @@ namespace CodexLocalDashboard
                         snapshot.QuotaPoints, 100d,
                         snapshot.TimelineStart,
                         snapshot.DisplayDuration, quotaColor,
-                        geometryScale, true, false) || rateDrawn;
+                        geometryScale, true, false);
+                    var fiveHourDrawn = DrawSeries(graphics, plot,
+                        snapshot.FiveHourQuotaPoints, 100d,
+                        snapshot.TimelineStart, snapshot.DisplayDuration,
+                        fiveHourQuotaColor, geometryScale, true, false);
+                    primaryDrawn = primaryDrawn || fiveHourDrawn || rateDrawn;
                     secondaryDrawn = DrawSeries(graphics, plot,
                         snapshot.CumulativePoints,
                         snapshot.CumulativeAxisMaximum,
@@ -1481,6 +1670,63 @@ namespace CodexLocalDashboard
             DrawHeaderText(graphics, rightText, font, rightBrush,
                 new RectangleF(bounds.Right - rightWidth, bounds.Top,
                     rightWidth, headerHeight), StringAlignment.Far);
+        }
+
+        private static void DrawHeaderQuad(Graphics graphics,
+            RectangleF bounds, float headerHeight, string firstText,
+            string secondText, string thirdText, string fourthText, Font font,
+            Brush firstBrush, Brush secondBrush, Brush thirdBrush,
+            Brush fourthBrush, float geometryScale)
+        {
+            var gap = Math.Max(1.5f, 2f * geometryScale);
+            var usable = Math.Max(1f, bounds.Width - gap * 3f);
+            var width = usable / 4f;
+            DrawHeaderText(graphics, firstText, font, firstBrush,
+                new RectangleF(bounds.Left, bounds.Top, width, headerHeight),
+                StringAlignment.Near);
+            DrawHeaderText(graphics, secondText, font, secondBrush,
+                new RectangleF(bounds.Left + width + gap, bounds.Top, width,
+                    headerHeight), StringAlignment.Center);
+            DrawHeaderText(graphics, thirdText, font, thirdBrush,
+                new RectangleF(bounds.Left + (width + gap) * 2f, bounds.Top,
+                    width, headerHeight), StringAlignment.Center);
+            DrawHeaderText(graphics, fourthText, font, fourthBrush,
+                new RectangleF(bounds.Right - width, bounds.Top, width,
+                    headerHeight), StringAlignment.Far);
+        }
+
+        private static void DrawHeaderQuotaSummary(Graphics graphics,
+            RectangleF bounds, float headerHeight, string weeklyText,
+            string fiveHourText, string rateText, string cumulativeText,
+            Font font, Brush weeklyBrush, Brush fiveHourBrush,
+            Brush rateBrush, Brush cumulativeBrush, float geometryScale)
+        {
+            var gap = Math.Max(2f, 3f * geometryScale);
+            var usable = Math.Max(1f, bounds.Width - gap * 2f);
+            var rateWidth = Math.Min(usable * .20f, Math.Max(28f,
+                graphics.MeasureString(rateText, font).Width));
+            var cumulativeWidth = Math.Min(usable * .28f, Math.Max(42f,
+                graphics.MeasureString(cumulativeText, font).Width));
+            var summaryWidth = Math.Max(1f, usable - rateWidth -
+                cumulativeWidth);
+            var weeklyMeasured = graphics.MeasureString(weeklyText,
+                font).Width;
+            var weeklyWidth = Math.Min(summaryWidth,
+                Math.Max(1f, weeklyMeasured));
+            var fiveHourWidth = Math.Max(1f, summaryWidth - weeklyWidth);
+
+            DrawHeaderText(graphics, weeklyText, font, weeklyBrush,
+                new RectangleF(bounds.Left, bounds.Top, weeklyWidth,
+                    headerHeight), StringAlignment.Near);
+            DrawHeaderText(graphics, fiveHourText, font, fiveHourBrush,
+                new RectangleF(bounds.Left + weeklyWidth, bounds.Top,
+                    fiveHourWidth, headerHeight), StringAlignment.Near);
+            DrawHeaderText(graphics, rateText, font, rateBrush,
+                new RectangleF(bounds.Left + summaryWidth + gap, bounds.Top,
+                    rateWidth, headerHeight), StringAlignment.Center);
+            DrawHeaderText(graphics, cumulativeText, font, cumulativeBrush,
+                new RectangleF(bounds.Right - cumulativeWidth, bounds.Top,
+                    cumulativeWidth, headerHeight), StringAlignment.Far);
         }
 
         private static void DrawHeaderText(Graphics graphics, string text,
@@ -1892,15 +2138,19 @@ namespace CodexLocalDashboard
         {
             public readonly UsageChartMode Mode;
             public readonly List<HistoryPoint> TokenPoints;
+            // Weekly/base quota curve, retained under the legacy name.
             public readonly List<HistoryPoint> QuotaPoints;
+            public readonly List<HistoryPoint> FiveHourQuotaPoints;
             public readonly List<HistoryPoint> CumulativePoints;
             public readonly double TokenAxisMaximum;
             public readonly double CumulativeAxisMaximum;
             public readonly double? CurrentQuota;
+            public readonly double? CurrentFiveHourQuota;
             public readonly double? CurrentTokenRate;
             public readonly double PeakTokenRate;
             public readonly double CumulativeIncrease;
             public readonly double QuotaConsumedDuringRuntime;
+            public readonly double FiveHourQuotaConsumedDuringRuntime;
             public readonly DateTimeOffset TimelineStart;
             public readonly DateTimeOffset Now;
             public readonly TimeSpan DisplayDuration;
@@ -1909,25 +2159,32 @@ namespace CodexLocalDashboard
             public RenderSnapshot(UsageChartMode mode,
                 List<HistoryPoint> tokenPoints,
                 List<HistoryPoint> quotaPoints,
+                List<HistoryPoint> fiveHourQuotaPoints,
                 List<HistoryPoint> cumulativePoints,
                 double tokenAxisMaximum, double cumulativeAxisMaximum,
-                double? currentQuota, double? currentTokenRate,
+                double? currentQuota, double? currentFiveHourQuota,
+                double? currentTokenRate,
                 double peakTokenRate, double cumulativeIncrease,
                 double quotaConsumedDuringRuntime,
+                double fiveHourQuotaConsumedDuringRuntime,
                 DateTimeOffset timelineStart, DateTimeOffset now,
                 TimeSpan displayDuration, bool historical)
             {
                 Mode = mode;
                 TokenPoints = tokenPoints;
                 QuotaPoints = quotaPoints;
+                FiveHourQuotaPoints = fiveHourQuotaPoints;
                 CumulativePoints = cumulativePoints;
                 TokenAxisMaximum = tokenAxisMaximum;
                 CumulativeAxisMaximum = cumulativeAxisMaximum;
                 CurrentQuota = currentQuota;
+                CurrentFiveHourQuota = currentFiveHourQuota;
                 CurrentTokenRate = currentTokenRate;
                 PeakTokenRate = peakTokenRate;
                 CumulativeIncrease = cumulativeIncrease;
                 QuotaConsumedDuringRuntime = quotaConsumedDuringRuntime;
+                FiveHourQuotaConsumedDuringRuntime =
+                    fiveHourQuotaConsumedDuringRuntime;
                 TimelineStart = timelineStart;
                 Now = now;
                 DisplayDuration = displayDuration;

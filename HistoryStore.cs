@@ -23,6 +23,12 @@ namespace CodexLocalDashboard
         public double? RemainingPercent;
         public int WindowMinutes;
         public DateTimeOffset? ResetsAt;
+        // Weekly quota remains under the original names so callers compiled
+        // against the v3 history model continue to work.  The independent
+        // rolling 5H window is carried alongside it in v4 records.
+        public double? FiveHourRemainingPercent;
+        public int FiveHourWindowMinutes;
+        public DateTimeOffset? FiveHourResetsAt;
         public double? TokenRatePerMinute;
 
         public long DeltaTokens { get { return DeltaInput + DeltaOutput; } }
@@ -33,6 +39,9 @@ namespace CodexLocalDashboard
             long sourceOutput = 0, long sourceCached = 0,
             long sourceReasoning = 0, double? remainingPercent = null,
             int windowMinutes = 0, DateTimeOffset? resetsAt = null,
+            double? fiveHourRemainingPercent = null,
+            int fiveHourWindowMinutes = 0,
+            DateTimeOffset? fiveHourResetsAt = null,
             double? tokenRatePerMinute = null)
         {
             At = at;
@@ -48,6 +57,9 @@ namespace CodexLocalDashboard
             RemainingPercent = remainingPercent;
             WindowMinutes = windowMinutes;
             ResetsAt = resetsAt;
+            FiveHourRemainingPercent = fiveHourRemainingPercent;
+            FiveHourWindowMinutes = fiveHourWindowMinutes;
+            FiveHourResetsAt = fiveHourResetsAt;
             TokenRatePerMinute = tokenRatePerMinute;
         }
     }
@@ -59,16 +71,23 @@ namespace CodexLocalDashboard
         public readonly double? RemainingPercent;
         public readonly int WindowMinutes;
         public readonly DateTimeOffset? ResetsAt;
+        public readonly double? FiveHourRemainingPercent;
+        public readonly int FiveHourWindowMinutes;
+        public readonly DateTimeOffset? FiveHourResetsAt;
 
         public PendingHistorySample(DateTimeOffset at, TokenTotals totals,
             double? remainingPercent, int windowMinutes,
-            DateTimeOffset? resetsAt)
+            DateTimeOffset? resetsAt, double? fiveHourRemainingPercent,
+            int fiveHourWindowMinutes, DateTimeOffset? fiveHourResetsAt)
         {
             At = at;
             Totals = totals;
             RemainingPercent = remainingPercent;
             WindowMinutes = windowMinutes;
             ResetsAt = resetsAt;
+            FiveHourRemainingPercent = fiveHourRemainingPercent;
+            FiveHourWindowMinutes = fiveHourWindowMinutes;
+            FiveHourResetsAt = fiveHourResetsAt;
         }
     }
 
@@ -79,13 +98,18 @@ namespace CodexLocalDashboard
     internal sealed class HistoryStore : IDisposable
     {
         internal const long MaximumFileBytes = 8L * 1024L * 1024L;
-        internal const int RecordSize = 96;
+        internal const int RecordSize = 104;
         private const int HeaderSize = 16;
-        private const int FormatVersion = 3;
+        private const int FormatVersion = 4;
         private const long CompactTargetBytes = 7L * 1024L * 1024L;
         private static readonly byte[] Magic =
             { (byte)'C', (byte)'L', (byte)'D', (byte)'H',
+              (byte)'S', (byte)'T', (byte)'0', (byte)'4' };
+        private static readonly byte[] LegacyMagic =
+            { (byte)'C', (byte)'L', (byte)'D', (byte)'H',
               (byte)'S', (byte)'T', (byte)'0', (byte)'3' };
+        private const int LegacyRecordSize = 96;
+        private const int LegacyFormatVersion = 3;
 
         private readonly object gate = new object();
         private readonly string storagePath;
@@ -152,15 +176,21 @@ namespace CodexLocalDashboard
                 }
                 if (!pendingFiveMinuteBucket.HasValue)
                     pendingFiveMinuteBucket = fiveMinuteBucket;
-                var quota = snapshot.Quotas
-                    .OrderBy(value => value.WindowMinutes)
-                    .FirstOrDefault();
+                var weeklyQuota = snapshot.WeeklyQuota;
+                var fiveHourQuota = snapshot.FiveHourQuota;
                 pending.Add(new PendingHistorySample(pointAt,
                     snapshot.Today,
-                    quota == null ? (double?)null : Math.Max(0d,
-                        Math.Min(100d, 100d - quota.UsedPercent)),
-                    quota == null ? 0 : quota.WindowMinutes,
-                    quota == null ? (DateTimeOffset?)null : quota.ResetsAt));
+                    weeklyQuota == null ? (double?)null : Math.Max(0d,
+                        Math.Min(100d, 100d - weeklyQuota.UsedPercent)),
+                    weeklyQuota == null ? 0 : weeklyQuota.WindowMinutes,
+                    weeklyQuota == null ? (DateTimeOffset?)null :
+                        weeklyQuota.ResetsAt,
+                    fiveHourQuota == null ? (double?)null : Math.Max(0d,
+                        Math.Min(100d, 100d - fiveHourQuota.UsedPercent)),
+                    fiveHourQuota == null ? 0 :
+                        fiveHourQuota.WindowMinutes,
+                    fiveHourQuota == null ? (DateTimeOffset?)null :
+                        fiveHourQuota.ResetsAt));
             }
         }
 
@@ -236,6 +266,8 @@ namespace CodexLocalDashboard
                 baseline, value.Totals.Input, value.Totals.Output,
                 value.Totals.Cached, value.Totals.Reasoning,
                 value.RemainingPercent, value.WindowMinutes, value.ResetsAt,
+                value.FiveHourRemainingPercent,
+                value.FiveHourWindowMinutes, value.FiveHourResetsAt,
                 baseline || previous == null ? (double?)null :
                     Math.Max(0d, delta.Total / Math.Max(.5d,
                         (value.At - previous.At).TotalMinutes)));
@@ -279,7 +311,7 @@ namespace CodexLocalDashboard
             using (var file = new FileStream(storagePath, FileMode.Open,
                 FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
             {
-                if (!HasValidHeader(file))
+                if (GetRecordSizeForHeader(file) != RecordSize)
                     throw new InvalidDataException("历史数据文件头无效。");
                 var completeLength = HeaderSize + Math.Max(0L,
                     (file.Length - HeaderSize) / RecordSize) * RecordSize;
@@ -293,14 +325,15 @@ namespace CodexLocalDashboard
             using (var input = new FileStream(path, FileMode.Open,
                 FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
-                if (!HasValidHeader(input) ||
-                    input.Length < HeaderSize + RecordSize) return null;
-                var count = (input.Length - HeaderSize) / RecordSize;
-                input.Position = HeaderSize + (count - 1) * RecordSize;
-                var buffer = new byte[RecordSize];
+                var recordSize = GetRecordSizeForHeader(input);
+                if (recordSize != RecordSize ||
+                    input.Length < HeaderSize + recordSize) return null;
+                var count = (input.Length - HeaderSize) / recordSize;
+                input.Position = HeaderSize + (count - 1) * recordSize;
+                var buffer = new byte[recordSize];
                 if (!ReadExactly(input, buffer, 0, buffer.Length)) return null;
                 HistorySample sample;
-                return TryDecode(buffer, out sample) ? sample : null;
+                return TryDecode(buffer, recordSize, out sample) ? sample : null;
             }
         }
 
@@ -312,13 +345,15 @@ namespace CodexLocalDashboard
             using (var input = new FileStream(path, FileMode.Open,
                 FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
-                if (!HasValidHeader(input)) return output;
-                var buffer = new byte[RecordSize];
+                var recordSize = GetRecordSizeForHeader(input);
+                if (recordSize == 0) return output;
+                var buffer = new byte[recordSize];
                 while (ReadExactly(input, buffer, 0, buffer.Length))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     HistorySample sample;
-                    if (TryDecode(buffer, out sample)) output.Add(sample);
+                    if (TryDecode(buffer, recordSize, out sample))
+                        output.Add(sample);
                 }
             }
             output.Sort(delegate(HistorySample left, HistorySample right)
@@ -417,6 +452,13 @@ namespace CodexLocalDashboard
                     ? second.WindowMinutes : first.WindowMinutes,
                 second.RemainingPercent.HasValue
                     ? second.ResetsAt : first.ResetsAt,
+                second.FiveHourRemainingPercent ??
+                    first.FiveHourRemainingPercent,
+                second.FiveHourRemainingPercent.HasValue
+                    ? second.FiveHourWindowMinutes :
+                        first.FiveHourWindowMinutes,
+                second.FiveHourRemainingPercent.HasValue
+                    ? second.FiveHourResetsAt : first.FiveHourResetsAt,
                 second.TokenRatePerMinute ?? first.TokenRatePerMinute);
         }
 
@@ -445,9 +487,12 @@ namespace CodexLocalDashboard
                 writer.Write(sample.SourceCached);
                 writer.Write(sample.SourceReasoning);
                 var hasQuota = sample.RemainingPercent.HasValue;
+                var hasFiveHourQuota =
+                    sample.FiveHourRemainingPercent.HasValue;
                 var hasRate = sample.TokenRatePerMinute.HasValue;
                 writer.Write((sample.IsBaseline ? 1 : 0) |
-                    (hasQuota ? 2 : 0) | (hasRate ? 4 : 0));
+                    (hasQuota ? 2 : 0) | (hasRate ? 4 : 0) |
+                    (hasFiveHourQuota ? 8 : 0));
                 writer.Write(30);
                 var quotaBasisPoints = hasQuota
                     ? (ushort)Math.Max(0, Math.Min(10000,
@@ -462,6 +507,19 @@ namespace CodexLocalDashboard
                     ? ToUnixSeconds(sample.ResetsAt.Value) : 0u);
                 writer.Write(hasRate ? (float)Math.Max(0d,
                     sample.TokenRatePerMinute.Value) : 0f);
+                var fiveHourBasisPoints = hasFiveHourQuota
+                    ? (ushort)Math.Max(0, Math.Min(10000,
+                        (int)Math.Round(sample.FiveHourRemainingPercent.Value *
+                            100d)))
+                    : (ushort)0;
+                var fiveHourWindow = hasFiveHourQuota
+                    ? (ushort)Math.Max(0, Math.Min(ushort.MaxValue,
+                        sample.FiveHourWindowMinutes)) : (ushort)0;
+                writer.Write(fiveHourBasisPoints);
+                writer.Write(fiveHourWindow);
+                writer.Write(hasFiveHourQuota &&
+                    sample.FiveHourResetsAt.HasValue
+                    ? ToUnixSeconds(sample.FiveHourResetsAt.Value) : 0u);
                 writer.Flush();
                 memory.Position = RecordSize - 4;
                 writer.Write(Checksum(buffer, 0, RecordSize - 4));
@@ -469,12 +527,15 @@ namespace CodexLocalDashboard
             return buffer;
         }
 
-        private static bool TryDecode(byte[] buffer, out HistorySample sample)
+        private static bool TryDecode(byte[] buffer, int recordSize,
+            out HistorySample sample)
         {
             sample = null;
-            if (buffer == null || buffer.Length != RecordSize) return false;
-            var expected = BitConverter.ToUInt32(buffer, RecordSize - 4);
-            if (expected != Checksum(buffer, 0, RecordSize - 4)) return false;
+            if (buffer == null || (recordSize != RecordSize &&
+                recordSize != LegacyRecordSize) ||
+                buffer.Length != recordSize) return false;
+            var expected = BitConverter.ToUInt32(buffer, recordSize - 4);
+            if (expected != Checksum(buffer, 0, recordSize - 4)) return false;
             try
             {
                 using (var memory = new MemoryStream(buffer, false))
@@ -495,6 +556,21 @@ namespace CodexLocalDashboard
                     var windowMinutes = reader.ReadUInt16();
                     var resetSeconds = reader.ReadUInt32();
                     var tokenRate = reader.ReadSingle();
+                    var hasQuota = (flags & 2) != 0;
+                    var legacyShortQuota = recordSize == LegacyRecordSize &&
+                        hasQuota && windowMinutes > 0 &&
+                        windowMinutes < 24 * 60;
+                    var hasFiveHourQuota = (flags & 8) != 0 &&
+                        recordSize == RecordSize;
+                    ushort fiveHourBasisPoints = 0;
+                    ushort fiveHourWindowMinutes = 0;
+                    uint fiveHourResetSeconds = 0;
+                    if (recordSize == RecordSize)
+                    {
+                        fiveHourBasisPoints = reader.ReadUInt16();
+                        fiveHourWindowMinutes = reader.ReadUInt16();
+                        fiveHourResetSeconds = reader.ReadUInt32();
+                    }
                     if (ticks < DateTime.MinValue.Ticks ||
                         ticks > DateTime.MaxValue.Ticks) return false;
                     var at = new DateTimeOffset(new DateTime(ticks,
@@ -503,12 +579,23 @@ namespace CodexLocalDashboard
                         deltaCached, deltaReasoning, (flags & 1) != 0,
                         sourceInput, sourceOutput, sourceCached,
                         sourceReasoning,
-                        (flags & 2) != 0
+                        hasQuota && !legacyShortQuota
                             ? (double?)quotaBasisPoints / 100d : null,
-                        (flags & 2) != 0 ? windowMinutes : 0,
-                        (flags & 2) != 0 && resetSeconds != 0
+                        hasQuota && !legacyShortQuota ? windowMinutes : 0,
+                        hasQuota && !legacyShortQuota && resetSeconds != 0
                             ? (DateTimeOffset?)FromUnixSeconds(resetSeconds)
                             : null,
+                        legacyShortQuota
+                            ? (double?)quotaBasisPoints / 100d
+                            : hasFiveHourQuota
+                                ? (double?)fiveHourBasisPoints / 100d : null,
+                        legacyShortQuota ? windowMinutes : hasFiveHourQuota
+                            ? fiveHourWindowMinutes : 0,
+                        legacyShortQuota && resetSeconds != 0
+                            ? (DateTimeOffset?)FromUnixSeconds(resetSeconds)
+                            : hasFiveHourQuota && fiveHourResetSeconds != 0
+                                ? (DateTimeOffset?)FromUnixSeconds(
+                                    fiveHourResetSeconds) : null,
                         (flags & 4) != 0 ? (double?)tokenRate : null);
                     return true;
                 }
@@ -556,16 +643,27 @@ namespace CodexLocalDashboard
             }
         }
 
-        private static bool HasValidHeader(Stream input)
+        private static int GetRecordSizeForHeader(Stream input)
         {
-            if (input.Length < HeaderSize) return false;
+            if (input == null || input.Length < HeaderSize) return 0;
             input.Position = 0;
             var header = new byte[HeaderSize];
-            if (!ReadExactly(input, header, 0, header.Length)) return false;
-            for (var index = 0; index < Magic.Length; index++)
-                if (header[index] != Magic[index]) return false;
-            return BitConverter.ToInt32(header, 8) == FormatVersion &&
-                BitConverter.ToInt32(header, 12) == RecordSize;
+            if (!ReadExactly(input, header, 0, header.Length)) return 0;
+            var version = BitConverter.ToInt32(header, 8);
+            var size = BitConverter.ToInt32(header, 12);
+            if (HeaderMatches(header, Magic) && version == FormatVersion &&
+                size == RecordSize) return RecordSize;
+            if (HeaderMatches(header, LegacyMagic) &&
+                version == LegacyFormatVersion && size == LegacyRecordSize)
+                return LegacyRecordSize;
+            return 0;
+        }
+
+        private static bool HeaderMatches(byte[] header, byte[] magic)
+        {
+            for (var index = 0; index < magic.Length; index++)
+                if (header[index] != magic[index]) return false;
+            return true;
         }
 
         private static bool ReadExactly(Stream input, byte[] buffer,
@@ -617,7 +715,7 @@ namespace CodexLocalDashboard
         internal static string ResolveStoragePath(string folder)
         {
             var prefix = "codex-usage-history-from";
-            var suffix = "-v1.5.0.bin";
+            var suffix = "-v1.5.0-v4.bin";
             var preferred = Path.Combine(folder, prefix +
                 DateTime.Today.ToString("yyyyMMdd",
                     CultureInfo.InvariantCulture) + suffix);
@@ -626,10 +724,11 @@ namespace CodexLocalDashboard
             try
             {
                 foreach (var path in Directory.EnumerateFiles(folder,
-                    prefix + "*-v1.5.0*.bin",
+                    prefix + "*.bin",
                     SearchOption.TopDirectoryOnly))
                 {
-                    if (IsCompatibleFile(path)) candidates.Add(path);
+                    if (GetFileRecordSize(path) == RecordSize)
+                        candidates.Add(path);
                 }
             }
             catch { }
@@ -665,7 +764,7 @@ namespace CodexLocalDashboard
                         SearchOption.TopDirectoryOnly)
                         .Where(IsCompatibleFile));
                     paths.AddRange(Directory.EnumerateFiles(folder,
-                        "codex-usage-history-from*-v1.5.0*.bin",
+                        "codex-usage-history-from*.bin",
                         SearchOption.TopDirectoryOnly)
                         .Where(IsCompatibleFile));
                 }
@@ -674,8 +773,7 @@ namespace CodexLocalDashboard
             if (!paths.Any(path => string.Equals(path, storagePath,
                 StringComparison.OrdinalIgnoreCase))) paths.Add(storagePath);
             return paths.Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(path => path.IndexOf("codex-usage-history-from",
-                    StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 0)
+                .OrderBy(path => GetFileRecordSize(path) == RecordSize ? 1 : 0)
                 .ThenBy(path => path, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
@@ -686,9 +784,20 @@ namespace CodexLocalDashboard
             {
                 using (var input = new FileStream(path, FileMode.Open,
                     FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                    return HasValidHeader(input);
+                    return GetRecordSizeForHeader(input) != 0;
             }
             catch { return false; }
+        }
+
+        private static int GetFileRecordSize(string path)
+        {
+            try
+            {
+                using (var input = new FileStream(path, FileMode.Open,
+                    FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    return GetRecordSizeForHeader(input);
+            }
+            catch { return 0; }
         }
 
         private void ThrowIfDisposed()

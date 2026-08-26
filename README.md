@@ -13,14 +13,14 @@
 
 ### Windows
 
-1. 获取 `CodexLocalDashboard-v1.5.5.exe`。
+1. 获取 `CodexLocalDashboard-v1.6.1.exe`。
 2. 双击运行，程序会自动扫描 `%USERPROFILE%\\.codex\\sessions` 和 `archived_sessions`，无需安装和登录。
-3. 仪表盘会显示最近的本地额度快照，以及今日、近 7 天和近 30 天 Token 用量。
+3. 仪表盘会显示最近的本地 5H／周额度快照、各自重置时间，以及今日、近 7 天和近 30 天 Token 用量。
 4. 左键点击托盘图标可直接显示缓存快照仪表盘；在仪表盘任意位置点击右键，可调整主题、透明度、置顶和隐藏。
 
 ### macOS 14 或更新版本
 
-1. 在 [v1.5.5 Release](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/tag/v1.5.5) 下载 `CodexQuotaWidget-macOS-v1.5.5.zip`。
+1. 在 [v1.6.1 Release](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/tag/v1.6.1) 下载 `CodexQuotaWidget-macOS-v1.6.1.zip`。
 2. 解压后将 `CodexQuotaWidget.app` 拖入“应用程序”文件夹，或保留在任意本地目录后双击运行。
 3. 当前公开包**没有 Apple Developer ID 签名或公证**。首次启动被系统拦截时，在 Finder 中按住 Control 点击 App，选择“打开”并在确认框中再次选择“打开”；也可前往“系统设置 → 隐私与安全性”选择“仍要打开”。
 4. 菜单栏额度图标左键可查看当前 5H／周额度摘要，右键可设置主题、透明度、置顶、隐藏与开机自动启动。实时页面除“历史／明细”按钮外的任意位置均可拖动面板；只有历史图表支持框选放大。
@@ -67,9 +67,9 @@ cd macOS
 ## 功能特点
 
 - **完全本地读取**：扫描本机 `.codex/sessions` 和 `archived_sessions`；不会联网或上传数据。
-- **额度快照**：macOS 面板显示本地日志中最近记录的 5H／周额度剩余百分比和各自重置时间；该值不是服务端实时查询结果。
-- **用量统计和图表**：汇总今日、近 7 天、近 30 天 Token；macOS 同时绘制周额度、橙色 5H 额度、速率和累计 Token，并保留 1h～48h 时间轴。
-- **本地历史数据**：每 30 秒缓冲一个隐私最小化的数据点，每 5 分钟批量写入；macOS 使用 104 字节 `CLDHST04` v4 记录保存双额度，并继续读取旧 96 字节格式；超过 8 MB 后分级压缩。
+- **额度快照**：显示本地日志中最近记录的 5H／周额度剩余百分比和各自重置时间；该值不是服务端实时查询结果。
+- **用量统计和图表**：汇总今日、近 7 天、近 30 天 Token；同时绘制周额度、橙色 5H 额度、速率和累计 Token，并保留 1h～48h 时间轴。
+- **本地历史数据**：每 30 秒缓冲一个隐私最小化的数据点，每 5 分钟批量写入；Windows 和 macOS 均使用 104 字节 `CLDHST04` v4 记录保存双额度，并继续读取旧 96 字节 v3 文件；超过 8 MB 后分级压缩。
 - **按需项目明细**：仅在打开明细时读取项目、会话、模型、Token 构成和工具调用；普通界面不常驻这些对象。
 - **原生 macOS 悬浮面板**：无标题、可拖动、等比缩放、可置顶；历史页面可框选时间段放大。它不含系统 WidgetKit 扩展，也不贴附 Codex 窗口。
 - **Windows 桌面仪表盘**：无标题栏、支持拖动、四边缩放、托盘常驻与可选顶部横条。

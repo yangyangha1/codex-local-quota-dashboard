@@ -20,8 +20,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.5.5.0")]
-[assembly: AssemblyFileVersion("1.5.5.0")]
+[assembly: AssemblyVersion("1.6.1.0")]
+[assembly: AssemblyFileVersion("1.6.1.0")]
 
 namespace CodexLocalDashboard
 {
@@ -48,6 +48,7 @@ namespace CodexLocalDashboard
 
     internal sealed class DashboardForm : Form
     {
+        private const string DisplayVersion = "v1.6.1";
         private const int DesignWidth = 320;
         private const int DesignHeight = 347;
         private readonly UsageScanner scanner = new UsageScanner();
@@ -562,36 +563,73 @@ namespace CodexLocalDashboard
             todayValue.Text = Ui.Compact(s.Today.Total);
             weekValue.Text = Ui.Compact(s.Week.Total);
             monthValue.Text = Ui.Compact(s.Month.Total);
-            var q = s.Quotas.OrderBy(x => x.WindowMinutes).FirstOrDefault();
+            var weeklyQuota = s.WeeklyQuota;
+            var fiveHourQuota = s.FiveHourQuota;
             var chartCaptureAt = DateTimeOffset.Now;
             tokenRateChart.Capture(
                 chartCaptureAt,
                 s.Today.Total,
-                q == null ? (double?)null : 100d - q.UsedPercent,
-                q == null ? 0 : q.WindowMinutes,
-                q == null ? (DateTimeOffset?)null : q.ResetsAt);
-            if (q == null)
+                weeklyQuota == null ? (double?)null :
+                    100d - weeklyQuota.UsedPercent,
+                weeklyQuota == null ? 0 : weeklyQuota.WindowMinutes,
+                weeklyQuota == null ? (DateTimeOffset?)null :
+                    weeklyQuota.ResetsAt,
+                fiveHourQuota == null ? (double?)null :
+                    100d - fiveHourQuota.UsedPercent,
+                fiveHourQuota == null ? 0 :
+                    fiveHourQuota.WindowMinutes,
+                fiveHourQuota == null ? (DateTimeOffset?)null :
+                    fiveHourQuota.ResetsAt);
+            if (weeklyQuota == null && fiveHourQuota == null)
             {
                 quotaTitle.Text = string.Empty; quotaValue.Text = "GPT·剩余暂无";
-                quotaSub.Text = "等待 Codex 写入限额信息"; quotaBar.Value = 0;
+                quotaSub.Text = "等待 Codex 写入限额信息";
+                quotaBar.SetQuotaValues(null, null);
                 tips.SetToolTip(quotaTitle, string.Empty);
                 RenderLayeredSurface();
                 return;
             }
             quotaTitle.Text = string.Empty;
-            var remaining = Math.Max(0, 100 - q.UsedPercent);
-            quotaValue.Text = string.Format("GPT·剩余{0:0.#}%", remaining);
-            quotaBar.Value = Math.Max(0, Math.Min(100, (int)Math.Round(remaining)));
-            quotaBar.FillColor = Ui.QuotaColor(remaining);
-            var reset = q.ResetsAt.HasValue ? q.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm") : "未知";
-            quotaSub.Text = string.Format("已用 {0:0.#}% · 重置 {1}", q.UsedPercent, reset);
+            var weeklyRemaining = weeklyQuota == null ? (double?)null :
+                Math.Max(0d, 100d - weeklyQuota.UsedPercent);
+            var fiveHourRemaining = fiveHourQuota == null ? (double?)null :
+                Math.Max(0d, 100d - fiveHourQuota.UsedPercent);
+            quotaValue.Text = FormatQuotaHeadline(fiveHourRemaining,
+                weeklyRemaining);
+            quotaBar.SetQuotaValues(weeklyRemaining, fiveHourRemaining);
+            quotaSub.Text = "5H重置 " + FormatQuotaReset(fiveHourQuota) +
+                " · 周重置 " + FormatQuotaReset(weeklyQuota);
             tips.SetToolTip(quotaTitle, string.Join("\n", s.Quotas.OrderBy(x => x.WindowMinutes).Select(x => Ui.WindowName(x.WindowMinutes) + "：已用 " + x.UsedPercent.ToString("0.#") + "%")));
             RenderLayeredSurface();
         }
 
+        private static string FormatQuotaHeadline(double? fiveHourRemaining,
+            double? weeklyRemaining)
+        {
+            if (fiveHourRemaining.HasValue && weeklyRemaining.HasValue)
+                return string.Format("GPT·{0:0}%/周{1:0}%",
+                    fiveHourRemaining.Value, weeklyRemaining.Value);
+            if (fiveHourRemaining.HasValue)
+                return string.Format("GPT·{0:0}%",
+                    fiveHourRemaining.Value);
+            if (weeklyRemaining.HasValue)
+                return string.Format("GPT·周{0:0}%", weeklyRemaining.Value);
+            return "GPT·剩余暂无";
+        }
+
+        private static string FormatQuotaReset(QuotaWindow quota)
+        {
+            return quota != null && quota.ResetsAt.HasValue
+                ? quota.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm")
+                : "—";
+        }
+
         private void ConfigureTray()
         {
-            tray.Text = "Codex 本地用量";
+            // Windows only exposes short text for a tray icon.  Keeping the
+            // version in its hover label makes the lower-right icon identify
+            // the currently running build without changing the app artwork.
+            tray.Text = "Codex 本地用量 " + DisplayVersion;
             trayIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             tray.Icon = trayIcon ?? SystemIcons.Application;
             tray.Visible = true;
@@ -601,6 +639,11 @@ namespace CodexLocalDashboard
                 if (stripMode) ExitStripMode(); else ShowDashboard();
             };
             var menu = contextMenu;
+            menu.Items.Add(new ToolStripMenuItem("版本 " + DisplayVersion)
+            {
+                Enabled = false
+            });
+            menu.Items.Add(new ToolStripSeparator());
             switchModeItem = new ToolStripMenuItem("切换为 Codex 顶部横条");
             switchModeItem.Click += delegate { ToggleDisplayMode(); };
             menu.Items.Add(switchModeItem);
@@ -900,9 +943,7 @@ namespace CodexLocalDashboard
                 var progress = control as QuotaProgressBar;
                 if (progress != null)
                 {
-                    using (var track = new SolidBrush(Color.FromArgb(150, progress.TrackColor))) graphics.FillRectangle(track, bounds);
-                    var fillWidth = (int)Math.Round(bounds.Width * progress.Value / 100d);
-                    if (fillWidth > 0) using (var fill = new SolidBrush(progress.FillColor)) graphics.FillRectangle(fill, bounds.X, bounds.Y, fillWidth, bounds.Height);
+                    progress.DrawLayered(graphics, bounds);
                     continue;
                 }
                 if (control is Panel)
@@ -2057,13 +2098,23 @@ namespace CodexLocalDashboard
 
     internal sealed class QuotaProgressBar : Control
     {
-        private int currentValue;
-        private Color fillColor = Color.FromArgb(81, 201, 142);
+        private double? weeklyValue;
+        private double? fiveHourValue;
         private Color trackColor = Color.FromArgb(55, 61, 73);
 
-        public int Value { get { return currentValue; } set { currentValue = Math.Max(0, Math.Min(100, value)); Invalidate(); } }
-        public Color FillColor { get { return fillColor; } set { fillColor = value; Invalidate(); } }
+        // Retain the original single-value surface for callers that have not
+        // yet switched to dual quotas; it represents the weekly/base value.
+        public int Value { get { return (int)Math.Round(weeklyValue ?? 0d); } set { weeklyValue = Math.Max(0, Math.Min(100, value)); Invalidate(); } }
+        public Color FillColor { get; set; }
         public Color TrackColor { get { return trackColor; } set { trackColor = value; Invalidate(); } }
+
+        public void SetQuotaValues(double? weeklyRemaining,
+            double? fiveHourRemaining)
+        {
+            weeklyValue = ClampPercent(weeklyRemaining);
+            fiveHourValue = ClampPercent(fiveHourRemaining);
+            Invalidate();
+        }
 
         public QuotaProgressBar()
         {
@@ -2073,12 +2124,93 @@ namespace CodexLocalDashboard
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            using (var track = new SolidBrush(trackColor))
-            using (var fill = new SolidBrush(fillColor))
+            DrawQuotaProgress(e.Graphics, ClientRectangle, false);
+        }
+
+        internal void DrawLayered(Graphics graphics, Rectangle bounds)
+        {
+            DrawQuotaProgress(graphics, bounds, true);
+        }
+
+        private void DrawQuotaProgress(Graphics graphics, Rectangle bounds,
+            bool layered)
+        {
+            if (graphics == null || bounds.Width <= 0 || bounds.Height <= 0)
+                return;
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var trackPath = Capsule(bounds))
+            using (var track = new SolidBrush(layered
+                ? Color.FromArgb(150, trackColor) : trackColor))
             {
-                e.Graphics.FillRectangle(track, ClientRectangle);
-                e.Graphics.FillRectangle(fill, 0, 0, (int)Math.Round(ClientSize.Width * currentValue / 100d), ClientSize.Height);
+                graphics.FillPath(track, trackPath);
+                var hasWeekly = weeklyValue.HasValue;
+                var baseFraction = hasWeekly ? weeklyValue.Value / 100d :
+                    fiveHourValue.HasValue ? 1d : 0d;
+                var overlayFraction = hasWeekly
+                    ? baseFraction * (fiveHourValue ?? 0d) / 100d
+                    : (fiveHourValue ?? 0d) / 100d;
+                var baseValue = weeklyValue ?? fiveHourValue ?? 0d;
+                FillCapsule(graphics, trackPath, bounds, baseFraction,
+                    Ui.QuotaColor(baseValue), false);
+                // The 5H fill is normalized inside the weekly remaining
+                // width.  A full 5H allowance therefore never paints beyond
+                // the weekly allowance that is still available underneath.
+                FillCapsule(graphics, trackPath, bounds, overlayFraction,
+                    Ui.QuotaColor(fiveHourValue ?? baseValue), true);
             }
+        }
+
+        private static double? ClampPercent(double? value)
+        {
+            if (!value.HasValue || double.IsNaN(value.Value) ||
+                double.IsInfinity(value.Value)) return null;
+            return Math.Max(0d, Math.Min(100d, value.Value));
+        }
+
+        private static void FillCapsule(Graphics graphics,
+            GraphicsPath fullPath, Rectangle bounds, double fraction,
+            Color color, bool patterned)
+        {
+            if (fraction <= 0d) return;
+            var width = (float)(bounds.Width * Math.Min(1d, fraction));
+            var state = graphics.Save();
+            try
+            {
+                graphics.SetClip(fullPath, CombineMode.Intersect);
+                graphics.SetClip(new RectangleF(bounds.Left, bounds.Top, width,
+                    bounds.Height), CombineMode.Intersect);
+                using (var fill = new SolidBrush(color))
+                    graphics.FillRectangle(fill, bounds.Left, bounds.Top,
+                        width, bounds.Height);
+                if (!patterned) return;
+                using (var stripes = new Pen(Color.FromArgb(100, Color.White),
+                    Math.Max(.65f, bounds.Height / 10f)))
+                {
+                    var step = Math.Max(4f, bounds.Height * .75f);
+                    for (var offset = (float)(bounds.Left - bounds.Height);
+                        offset < bounds.Left + width + bounds.Height;
+                        offset += step)
+                        graphics.DrawLine(stripes, offset, bounds.Bottom,
+                            offset + bounds.Height, bounds.Top);
+                }
+            }
+            finally { graphics.Restore(state); }
+        }
+
+        private static GraphicsPath Capsule(Rectangle bounds)
+        {
+            var path = new GraphicsPath();
+            var diameter = Math.Max(1, Math.Min(bounds.Width, bounds.Height));
+            if (bounds.Width <= bounds.Height)
+            {
+                path.AddEllipse(bounds);
+                return path;
+            }
+            path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 90, 180);
+            path.AddArc(bounds.Right - diameter, bounds.Top, diameter,
+                diameter, 270, 180);
+            path.CloseFigure();
+            return path;
         }
     }
 
@@ -2110,14 +2242,13 @@ namespace CodexLocalDashboard
                 var resetText = "重置日期：未知";
                 if (data != null && data.Quotas.Count > 0)
                 {
-                    var quota = data.Quotas.OrderBy(x => x.WindowMinutes).First();
-                    leftText = string.Format("{0}剩余：{1:0.#}%", ShortWindowName(quota.WindowMinutes), Math.Max(0, 100 - quota.UsedPercent));
-                    resetText = quota.ResetsAt.HasValue ? "重置日期：" + quota.ResetsAt.Value.ToLocalTime().ToString("M月d日") : "重置日期：未知";
+                    leftText = QuotaSummary(data);
+                    resetText = QuotaResetSummary(data);
                 }
                 var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
                 var leftWidth = TextRenderer.MeasureText(leftText, font, Size.Empty, flags).Width;
                 var resetWidth = TextRenderer.MeasureText(resetText, font, Size.Empty, flags).Width;
-                preferredLogicalWidth = Math.Max(280, (int)Math.Ceiling((7 * scale + leftWidth + 5 * scale + 110 * scale + 4 * scale + resetWidth + 6 * scale) / scale));
+                preferredLogicalWidth = Math.Max(360, (int)Math.Ceiling((7 * scale + leftWidth + 5 * scale + 110 * scale + 4 * scale + resetWidth + 6 * scale) / scale));
                 preferredWidthDirty = false;
                 return preferredLogicalWidth;
             }
@@ -2156,9 +2287,11 @@ namespace CodexLocalDashboard
                 return;
             }
 
-            var quota = data.Quotas.OrderBy(x => x.WindowMinutes).First();
-            var remaining = Math.Max(0, 100 - quota.UsedPercent);
-            var reset = quota.ResetsAt.HasValue ? "重置日期：" + quota.ResetsAt.Value.ToLocalTime().ToString("M月d日") : "重置日期：未知";
+            var weeklyQuota = data.WeeklyQuota;
+            var fiveHourQuota = data.FiveHourQuota;
+            var weeklyRemaining = Remaining(weeklyQuota);
+            var fiveHourRemaining = Remaining(fiveHourQuota);
+            var reset = QuotaResetSummary(data);
             var progressHeight = Math.Max(3f, 4 * scale);
             var progressY = (ClientSize.Height - progressHeight) / 2f;
 
@@ -2166,10 +2299,9 @@ namespace CodexLocalDashboard
                 FontStyle.Regular))
             using (var menuText = new SolidBrush(menuTextColor))
             using (var track = new SolidBrush(layered ? Color.FromArgb(170, trackColor) : trackColor))
-            using (var accent = new SolidBrush(Ui.QuotaColor(remaining)))
             using (var centered = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter })
             {
-                var leftText = string.Format("{0}剩余：{1:0.#}%", ShortWindowName(quota.WindowMinutes), remaining);
+                var leftText = QuotaSummary(data);
                 var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
                 var leftWidth = TextRenderer.MeasureText(leftText, normal, Size.Empty, flags).Width;
                 var resetTextWidth = TextRenderer.MeasureText(reset, normal, Size.Empty, flags).Width;
@@ -2179,9 +2311,89 @@ namespace CodexLocalDashboard
                 var progressWidth = Math.Max(20 * scale, resetX - progressX - 4 * scale);
                 graphics.DrawString(leftText, normal, menuText, new RectangleF(leftX, 0, leftWidth + 2 * scale, ClientSize.Height), centered);
                 graphics.FillRectangle(track, progressX, progressY, progressWidth, progressHeight);
-                graphics.FillRectangle(accent, progressX, progressY, (float)(progressWidth * remaining / 100d), progressHeight);
+                DrawDualQuotaProgress(graphics, new RectangleF(progressX,
+                    progressY, progressWidth, progressHeight), weeklyRemaining,
+                    fiveHourRemaining);
                 graphics.DrawString(reset, normal, menuText, new RectangleF(resetX, 0, resetTextWidth + 2 * scale, ClientSize.Height), centered);
             }
+        }
+
+        private static double? Remaining(QuotaWindow quota)
+        {
+            return quota == null ? (double?)null : Math.Max(0d,
+                Math.Min(100d, 100d - quota.UsedPercent));
+        }
+
+        private static string QuotaSummary(UsageSnapshot data)
+        {
+            var fiveHour = Remaining(data.FiveHourQuota);
+            var weekly = Remaining(data.WeeklyQuota);
+            if (fiveHour.HasValue && weekly.HasValue)
+                return string.Format("5H {0:0.#}% / 周 {1:0.#}%",
+                    fiveHour.Value, weekly.Value);
+            if (fiveHour.HasValue)
+                return string.Format("5H {0:0.#}%", fiveHour.Value);
+            if (weekly.HasValue)
+                return string.Format("周 {0:0.#}%", weekly.Value);
+            return "等待本地限额快照";
+        }
+
+        private static string QuotaResetSummary(UsageSnapshot data)
+        {
+            return "5H重置 " + ResetText(data.FiveHourQuota) + " · 周重置 " +
+                ResetText(data.WeeklyQuota);
+        }
+
+        private static string ResetText(QuotaWindow quota)
+        {
+            return quota != null && quota.ResetsAt.HasValue
+                ? quota.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm")
+                : "—";
+        }
+
+        private static void DrawDualQuotaProgress(Graphics graphics,
+            RectangleF bounds, double? weeklyRemaining,
+            double? fiveHourRemaining)
+        {
+            var hasWeekly = weeklyRemaining.HasValue;
+            var baseFraction = hasWeekly ? weeklyRemaining.Value / 100d :
+                fiveHourRemaining.HasValue ? 1d : 0d;
+            var overlayFraction = hasWeekly
+                ? baseFraction * (fiveHourRemaining ?? 0d) / 100d
+                : (fiveHourRemaining ?? 0d) / 100d;
+            var baseValue = weeklyRemaining ?? fiveHourRemaining ?? 0d;
+            FillProgress(graphics, bounds, baseFraction,
+                Ui.QuotaColor(baseValue), false);
+            FillProgress(graphics, bounds, overlayFraction,
+                Ui.QuotaColor(fiveHourRemaining ?? baseValue), true);
+        }
+
+        private static void FillProgress(Graphics graphics, RectangleF bounds,
+            double fraction, Color color, bool patterned)
+        {
+            if (fraction <= 0d) return;
+            var width = (float)(bounds.Width * Math.Min(1d, fraction));
+            using (var fill = new SolidBrush(color))
+                graphics.FillRectangle(fill, bounds.Left, bounds.Top, width,
+                    bounds.Height);
+            if (!patterned) return;
+            var state = graphics.Save();
+            try
+            {
+                graphics.SetClip(new RectangleF(bounds.Left, bounds.Top,
+                    width, bounds.Height), CombineMode.Intersect);
+                using (var stripes = new Pen(Color.FromArgb(100, Color.White),
+                    Math.Max(.65f, bounds.Height / 4f)))
+                {
+                    var step = Math.Max(4f, bounds.Height * .75f);
+                    for (var offset = bounds.Left - bounds.Height;
+                        offset < bounds.Left + width + bounds.Height;
+                        offset += step)
+                        graphics.DrawLine(stripes, offset, bounds.Bottom,
+                            offset + bounds.Height, bounds.Top);
+                }
+            }
+            finally { graphics.Restore(state); }
         }
 
         private static string ShortWindowName(int minutes)
@@ -2908,5 +3120,49 @@ namespace CodexLocalDashboard
         public TokenTotals Today, Week, Month; public int WeekSessions; public DateTimeOffset QuotaAt; public List<QuotaWindow> Quotas; public List<ProjectUsage> Projects;
         public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l) : this(t, w, m, s, q, l, new List<ProjectUsage>()) { }
         public UsageSnapshot(TokenTotals t, TokenTotals w, TokenTotals m, int s, DateTimeOffset q, List<QuotaWindow> l, List<ProjectUsage> projects) { Today = t; Week = w; Month = m; WeekSessions = s; QuotaAt = q; Quotas = l; Projects = projects ?? new List<ProjectUsage>(); }
+
+        // Select the two quota windows explicitly.  Codex may emit them in
+        // either order, so selecting the first/shortest value is no longer
+        // reliable once 5H and weekly allowances are both present.
+        public QuotaWindow FiveHourQuota
+        {
+            get
+            {
+                return (Quotas ?? new List<QuotaWindow>())
+                    .Where(value => value != null &&
+                        value.WindowMinutes > 0 &&
+                        value.WindowMinutes < 24 * 60)
+                    .OrderBy(value => Math.Abs(value.WindowMinutes - 5 * 60))
+                    .FirstOrDefault();
+            }
+        }
+
+        public QuotaWindow WeeklyQuota
+        {
+            get
+            {
+                return (Quotas ?? new List<QuotaWindow>())
+                    .Where(value => value != null &&
+                        value.WindowMinutes >= 24 * 60)
+                    .OrderBy(value => Math.Abs(value.WindowMinutes -
+                        7 * 24 * 60))
+                    .FirstOrDefault();
+            }
+        }
+
+        // Compatibility surface for any existing caller that expects one
+        // visible quota.  New UI, history, and chart code use the two
+        // explicit properties above.
+        public QuotaWindow PrimaryQuota
+        {
+            get
+            {
+                return FiveHourQuota ?? WeeklyQuota ??
+                    (Quotas ?? new List<QuotaWindow>())
+                        .Where(value => value != null)
+                        .OrderBy(value => value.WindowMinutes)
+                        .FirstOrDefault();
+            }
+        }
     }
 }

@@ -84,9 +84,9 @@ struct DashboardView: View {
     private var quotaHeadline: String {
         switch (model.fiveHourQuota, model.weeklyQuota) {
         case let (fiveHour?, weekly?):
-            return "GPT·5H\(wholePercent(fiveHour.remainingPercent))%/周\(wholePercent(weekly.remainingPercent))%"
+            return "GPT·\(wholePercent(fiveHour.remainingPercent))%/周\(wholePercent(weekly.remainingPercent))%"
         case let (fiveHour?, nil):
-            return "GPT·5H\(wholePercent(fiveHour.remainingPercent))%"
+            return "GPT·\(wholePercent(fiveHour.remainingPercent))%"
         case let (nil, weekly?):
             return "GPT·周\(wholePercent(weekly.remainingPercent))%"
         case (nil, nil):
@@ -436,12 +436,14 @@ private struct ChartInfoLine: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Text("消耗额度 \(wholePercent(snapshot.quotaConsumedDuringRuntime))% · \(durationText)")
-                .foregroundStyle(quotaSeriesColor)
-            if let fiveHourQuota = snapshot.currentFiveHourQuota {
-                Spacer(minLength: 7)
-                Text("5H \(wholePercent(fiveHourQuota))%")
+            if snapshot.currentFiveHourQuota != nil {
+                Text("消耗额度：周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%/")
+                    .foregroundStyle(quotaSeriesColor)
+                Text("5H \(wholePercent(snapshot.fiveHourQuotaConsumedDuringRuntime))% · \(durationText)")
                     .foregroundStyle(fiveHourQuotaSeriesColor)
+            } else {
+                Text("消耗额度：周\(wholePercent(snapshot.quotaConsumedDuringRuntime))% · \(durationText)")
+                    .foregroundStyle(quotaSeriesColor)
             }
             if showsRate {
                 Spacer(minLength: 8)

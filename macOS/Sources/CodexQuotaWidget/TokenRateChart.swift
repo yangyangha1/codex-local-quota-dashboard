@@ -24,6 +24,7 @@ struct ChartRenderSnapshot: Equatable, Sendable {
     let peakTokenRate: Double
     let cumulativeIncrease: Double
     let quotaConsumedDuringRuntime: Double
+    let fiveHourQuotaConsumedDuringRuntime: Double
     let timelineStart: Date
     let timelineEnd: Date
     let displayDuration: TimeInterval
@@ -251,6 +252,7 @@ struct TokenRateChart: Sendable {
         let selectedQuota = Self.select(weeklyQuota.points, from: timelineStart, to: timelineEnd)
         let selectedQuotaSource = Self.selectWithBaseline(weeklyQuota.sourcePoints, from: timelineStart, to: timelineEnd)
         let selectedFiveHourQuota = Self.select(fiveHourQuota.points, from: timelineStart, to: timelineEnd)
+        let selectedFiveHourQuotaSource = Self.selectWithBaseline(fiveHourQuota.sourcePoints, from: timelineStart, to: timelineEnd)
         let cumulativePoints = buildCumulativePoints(from: timelineStart, to: timelineEnd)
         let currentQuota = weeklyQuota.currentValue ?? selectedQuota.last?.value
         let currentFiveHourQuota = fiveHourQuota.currentValue ?? selectedFiveHourQuota.last?.value
@@ -273,6 +275,7 @@ struct TokenRateChart: Sendable {
             peakTokenRate: peakRate,
             cumulativeIncrease: cumulativeIncrease,
             quotaConsumedDuringRuntime: QuotaSeries.calculateConsumption(selectedQuotaSource, carryAcrossHistoricalGaps: historicalSource),
+            fiveHourQuotaConsumedDuringRuntime: QuotaSeries.calculateConsumption(selectedFiveHourQuotaSource, carryAcrossHistoricalGaps: historicalSource),
             timelineStart: timelineStart,
             timelineEnd: timelineStart.addingTimeInterval(duration),
             displayDuration: duration,
