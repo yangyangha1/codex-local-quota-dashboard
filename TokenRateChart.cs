@@ -1381,32 +1381,28 @@ namespace CodexLocalDashboard
                 bool secondaryDrawn;
                 if (snapshot.Mode == UsageChartMode.CumulativeAndQuota)
                 {
-                    var durationText = ((int)snapshot.DisplayDuration.TotalHours)
-                        .ToString(CultureInfo.InvariantCulture) + "H";
                     var hasFiveHourQuota = snapshot.CurrentFiveHourQuota.HasValue;
-                    var consumptionPrefixText = "消耗：";
+                    var consumptionPrefixText = ((int)snapshot.DisplayDuration.TotalHours)
+                        .ToString(CultureInfo.InvariantCulture) + "H消耗";
                     var weeklyConsumptionText = "周" +
-                        FormatPercent(snapshot.QuotaConsumedDuringRuntime) +
-                        (hasFiveHourQuota ? "/" : string.Empty);
+                        FormatPercent(snapshot.QuotaConsumedDuringRuntime);
+                    var quotaSeparatorText = hasFiveHourQuota ? "/" : string.Empty;
                     var fiveHourConsumptionText = hasFiveHourQuota
                         ? "5H " +
                             FormatPercent(snapshot.FiveHourQuotaConsumedDuringRuntime)
                         : string.Empty;
-                    var durationConsumptionText = " · " + durationText;
                     var rateText = snapshot.Historical ? string.Empty :
-                        snapshot.CurrentTokenRate.HasValue
-                        ? "速率 " +
-                            FormatTokenCount(
-                                snapshot.CurrentTokenRate.Value) + "/分"
-                        : "速率 收集中";
+                        "速率 " + FormatTokenCount(
+                            snapshot.CurrentTokenRate ?? 0d) + "/分";
                     var rightText = "累计 Token：" +
                         FormatTokenCount(snapshot.CumulativeIncrease);
                     DrawHeaderQuotaSummary(graphics, bounds, headerHeight,
                         consumptionPrefixText, weeklyConsumptionText,
-                        fiveHourConsumptionText, durationConsumptionText,
+                        quotaSeparatorText, fiveHourConsumptionText,
                         rateText, rightText,
-                        headerFont, rateBrush, quotaBrush, fiveHourQuotaBrush,
-                        rateBrush, rateBrush, tokenBrush, geometryScale);
+                        headerFont, rateBrush, quotaBrush, rateBrush,
+                        fiveHourQuotaBrush, rateBrush, tokenBrush,
+                        geometryScale);
 
                     var rateDrawn = DrawSeries(graphics, plot,
                         snapshot.TokenPoints, snapshot.TokenAxisMaximum,
@@ -1701,37 +1697,35 @@ namespace CodexLocalDashboard
 
         private static void DrawHeaderQuotaSummary(Graphics graphics,
             RectangleF bounds, float headerHeight, string prefixText,
-            string weeklyText, string fiveHourText, string durationText,
+            string weeklyText, string separatorText, string fiveHourText,
             string rateText, string cumulativeText, Font font,
-            Brush prefixBrush, Brush weeklyBrush, Brush fiveHourBrush,
-            Brush durationBrush, Brush rateBrush, Brush cumulativeBrush,
+            Brush prefixBrush, Brush weeklyBrush, Brush separatorBrush,
+            Brush fiveHourBrush, Brush rateBrush, Brush cumulativeBrush,
             float geometryScale)
         {
             var gap = Math.Max(2f, 3f * geometryScale);
-            var usable = Math.Max(1f, bounds.Width - gap * 2f);
-            var rateWidth = Math.Min(usable * .20f, Math.Max(28f,
+            var rateWidth = Math.Min(bounds.Width * .28f, Math.Max(28f,
                 graphics.MeasureString(rateText, font).Width));
-            var cumulativeWidth = Math.Min(usable * .28f, Math.Max(42f,
-                graphics.MeasureString(cumulativeText, font).Width));
-            var summaryWidth = Math.Max(1f, usable - rateWidth -
-                cumulativeWidth);
+            var rateLeft = bounds.Left + (bounds.Width - rateWidth) / 2f;
+            var summaryWidth = Math.Max(1f, rateLeft - bounds.Left - gap);
+            var cumulativeLeft = rateLeft + rateWidth + gap;
+            var cumulativeWidth = Math.Max(1f, bounds.Right - cumulativeLeft);
             var prefixMeasured = Math.Max(1f,
                 graphics.MeasureString(prefixText, font).Width);
             var weeklyMeasured = Math.Max(1f,
                 graphics.MeasureString(weeklyText, font).Width);
             var fiveHourMeasured = string.IsNullOrEmpty(fiveHourText) ? 0f :
                 Math.Max(1f, graphics.MeasureString(fiveHourText, font).Width);
-            var durationMeasured = Math.Max(1f,
-                graphics.MeasureString(durationText, font).Width);
+            var separatorMeasured = string.IsNullOrEmpty(separatorText) ? 0f :
+                Math.Max(1f, graphics.MeasureString(separatorText, font).Width);
             var summaryMeasured = prefixMeasured + weeklyMeasured +
-                fiveHourMeasured + durationMeasured;
+                separatorMeasured + fiveHourMeasured;
             var scale = summaryMeasured > summaryWidth
                 ? summaryWidth / summaryMeasured : 1f;
             var prefixWidth = prefixMeasured * scale;
             var weeklyWidth = weeklyMeasured * scale;
+            var separatorWidth = separatorMeasured * scale;
             var fiveHourWidth = fiveHourMeasured * scale;
-            var durationWidth = Math.Max(1f, summaryWidth - prefixWidth -
-                weeklyWidth - fiveHourWidth);
 
             var x = bounds.Left;
             DrawHeaderText(graphics, prefixText, font, prefixBrush,
@@ -1742,18 +1736,18 @@ namespace CodexLocalDashboard
                 new RectangleF(x, bounds.Top, weeklyWidth,
                     headerHeight), StringAlignment.Near);
             x += weeklyWidth;
+            DrawHeaderText(graphics, separatorText, font, separatorBrush,
+                new RectangleF(x, bounds.Top, separatorWidth,
+                    headerHeight), StringAlignment.Near);
+            x += separatorWidth;
             DrawHeaderText(graphics, fiveHourText, font, fiveHourBrush,
                 new RectangleF(x, bounds.Top, fiveHourWidth,
                     headerHeight), StringAlignment.Near);
-            x += fiveHourWidth;
-            DrawHeaderText(graphics, durationText, font, durationBrush,
-                new RectangleF(x, bounds.Top, durationWidth,
-                    headerHeight), StringAlignment.Near);
             DrawHeaderText(graphics, rateText, font, rateBrush,
-                new RectangleF(bounds.Left + summaryWidth + gap, bounds.Top,
+                new RectangleF(rateLeft, bounds.Top,
                     rateWidth, headerHeight), StringAlignment.Center);
             DrawHeaderText(graphics, cumulativeText, font, cumulativeBrush,
-                new RectangleF(bounds.Right - cumulativeWidth, bounds.Top,
+                new RectangleF(cumulativeLeft, bounds.Top,
                     cumulativeWidth, headerHeight), StringAlignment.Far);
         }
 

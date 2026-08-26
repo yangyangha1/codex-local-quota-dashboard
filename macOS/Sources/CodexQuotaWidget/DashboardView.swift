@@ -13,6 +13,9 @@ struct DashboardView: View {
     private var quotaHeadlineFont: Font {
         Font(NSFont(name: "PingFangSC-Semibold", size: 21) ?? NSFont.systemFont(ofSize: 21, weight: .semibold))
     }
+    private var quotaHeadlineTagFont: Font {
+        Font(NSFont(name: "PingFangSC-Semibold", size: 10.5) ?? NSFont.systemFont(ofSize: 10.5, weight: .semibold))
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -42,8 +45,7 @@ struct DashboardView: View {
     private func header(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .center, spacing: 5) {
-                Text(quotaHeadline)
-                    .font(quotaHeadlineFont)
+                quotaHeadline
                     .foregroundStyle(primaryColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.66)
@@ -81,16 +83,32 @@ struct DashboardView: View {
         }
     }
 
-    private var quotaHeadline: String {
+    @ViewBuilder
+    private var quotaHeadline: some View {
         switch (model.fiveHourQuota, model.weeklyQuota) {
         case let (fiveHour?, weekly?):
-            return "GPT·\(wholePercent(fiveHour.remainingPercent))%/周\(wholePercent(weekly.remainingPercent))%"
+            HStack(alignment: .bottom, spacing: 0) {
+                Text("GPT·\(wholePercent(fiveHour.remainingPercent))%")
+                    .font(quotaHeadlineFont)
+                Text("5H").font(quotaHeadlineTagFont)
+                Text("/\(wholePercent(weekly.remainingPercent))%")
+                    .font(quotaHeadlineFont)
+                Text("周").font(quotaHeadlineTagFont)
+            }
         case let (fiveHour?, nil):
-            return "GPT·\(wholePercent(fiveHour.remainingPercent))%"
+            HStack(alignment: .bottom, spacing: 0) {
+                Text("GPT·\(wholePercent(fiveHour.remainingPercent))%")
+                    .font(quotaHeadlineFont)
+                Text("5H").font(quotaHeadlineTagFont)
+            }
         case let (nil, weekly?):
-            return "GPT·周\(wholePercent(weekly.remainingPercent))%"
+            HStack(alignment: .bottom, spacing: 0) {
+                Text("GPT·\(wholePercent(weekly.remainingPercent))%")
+                    .font(quotaHeadlineFont)
+                Text("周").font(quotaHeadlineTagFont)
+            }
         case (nil, nil):
-            return "GPT·暂无缓存"
+            Text("GPT·暂无缓存").font(quotaHeadlineFont)
         }
     }
 
@@ -435,33 +453,39 @@ private struct ChartInfoLine: View {
     let snapshot: ChartRenderSnapshot
 
     var body: some View {
-        HStack(spacing: 0) {
-            Text("消耗：")
-                .foregroundStyle(rateSeriesColor)
-            if snapshot.currentFiveHourQuota != nil {
-                Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%/")
-                    .foregroundStyle(quotaSeriesColor)
-                Text("5H \(wholePercent(snapshot.fiveHourQuotaConsumedDuringRuntime))%")
-                    .foregroundStyle(fiveHourQuotaSeriesColor)
-            } else {
-                Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
-                    .foregroundStyle(quotaSeriesColor)
-            }
-            Text(" · \(durationText)")
-                .foregroundStyle(rateSeriesColor)
-            if showsRate {
-                Spacer(minLength: 8)
-                Text("速率 \(rateText)")
+        GeometryReader { geometry in
+            let columnWidth = geometry.size.width / 3
+            HStack(spacing: 0) {
+                quotaSummary
+                    .frame(width: columnWidth, alignment: .leading)
+                Text(showsRate ? "速率 \(rateText)" : "")
                     .foregroundStyle(rateSeriesColor)
+                    .frame(width: columnWidth, alignment: .center)
+                Text("累计 Token \(compactRate(snapshot.cumulativeIncrease))")
+                    .foregroundStyle(cumulativeSeriesColor)
+                    .frame(width: columnWidth, alignment: .trailing)
             }
-            Spacer(minLength: 8)
-            Text("累计 Token \(compactRate(snapshot.cumulativeIncrease))")
-                .foregroundStyle(cumulativeSeriesColor)
+            .lineLimit(1)
+            .minimumScaleFactor(0.55)
         }
+        .frame(height: 14)
         .font(.system(size: 10, weight: .semibold))
         .monospacedDigit()
-        .lineLimit(1)
-        .minimumScaleFactor(0.66)
+    }
+
+    @ViewBuilder
+    private var quotaSummary: some View {
+        HStack(spacing: 0) {
+            Text("\(durationText)消耗")
+                .foregroundStyle(rateSeriesColor)
+            Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
+                .foregroundStyle(quotaSeriesColor)
+            if snapshot.currentFiveHourQuota != nil {
+                Text("/").foregroundStyle(rateSeriesColor)
+                Text("5H \(wholePercent(snapshot.fiveHourQuotaConsumedDuringRuntime))%")
+                    .foregroundStyle(fiveHourQuotaSeriesColor)
+            }
+        }
     }
 
     private var durationText: String {
@@ -473,11 +497,11 @@ private struct ChartInfoLine: View {
     }
 
     private var rateText: String {
-        snapshot.currentTokenRate.map { "\(compactRate($0))/分" } ?? "—"
+        "\(compactRate(snapshot.currentTokenRate ?? 0))/分"
     }
 
     private var showsRate: Bool {
-        !snapshot.historical && (snapshot.currentTokenRate ?? 0) > 0
+        !snapshot.historical
     }
 }
 
