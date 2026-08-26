@@ -349,7 +349,7 @@ private struct DualQuotaProgressBar: View {
                 }
                 if overlayFraction > 0 {
                     Capsule()
-                        .fill(quotaColor(fiveHourValue ?? weeklyValue ?? 0))
+                        .fill(fiveHourQuotaSeriesColor.opacity(0.80))
                         .overlay(FiveHourQuotaPattern())
                         .clipShape(Capsule())
                         .frame(width: max(0, geometry.size.width * overlayFraction))
@@ -441,7 +441,7 @@ private struct ChartInfoLine: View {
             if snapshot.currentFiveHourQuota != nil {
                 Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%/")
                     .foregroundStyle(quotaSeriesColor)
-                Text("5H\(wholePercent(snapshot.fiveHourQuotaConsumedDuringRuntime))%")
+                Text("5H \(wholePercent(snapshot.fiveHourQuotaConsumedDuringRuntime))%")
                     .foregroundStyle(fiveHourQuotaSeriesColor)
             } else {
                 Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")

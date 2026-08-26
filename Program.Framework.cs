@@ -2156,7 +2156,7 @@ namespace CodexLocalDashboard
                 // width.  A full 5H allowance therefore never paints beyond
                 // the weekly allowance that is still available underneath.
                 FillCapsule(graphics, trackPath, bounds, overlayFraction,
-                    Ui.QuotaColor(fiveHourValue ?? baseValue), true);
+                    Color.FromArgb(204, 242, 125, 43), true);
             }
         }
 
@@ -2366,7 +2366,7 @@ namespace CodexLocalDashboard
             FillProgress(graphics, bounds, baseFraction,
                 Ui.QuotaColor(baseValue), false);
             FillProgress(graphics, bounds, overlayFraction,
-                Ui.QuotaColor(fiveHourRemaining ?? baseValue), true);
+                Color.FromArgb(204, 242, 125, 43), true);
         }
 
         private static void FillProgress(Graphics graphics, RectangleF bounds,

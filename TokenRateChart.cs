@@ -1389,9 +1389,8 @@ namespace CodexLocalDashboard
                         FormatPercent(snapshot.QuotaConsumedDuringRuntime) +
                         (hasFiveHourQuota ? "/" : string.Empty);
                     var fiveHourConsumptionText = hasFiveHourQuota
-                        ? "5H" +
-                            FormatPercent(snapshot.FiveHourQuotaConsumedDuringRuntime) +
-                            "%"
+                        ? "5H " +
+                            FormatPercent(snapshot.FiveHourQuotaConsumedDuringRuntime)
                         : string.Empty;
                     var durationConsumptionText = " · " + durationText;
                     var rateText = snapshot.Historical ? string.Empty :
