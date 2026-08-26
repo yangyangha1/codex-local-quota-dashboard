@@ -436,15 +436,19 @@ private struct ChartInfoLine: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            Text("消耗：")
+                .foregroundStyle(rateSeriesColor)
             if snapshot.currentFiveHourQuota != nil {
-                Text("消耗额度：周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%/")
+                Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%/")
                     .foregroundStyle(quotaSeriesColor)
-                Text("5H \(wholePercent(snapshot.fiveHourQuotaConsumedDuringRuntime))% · \(durationText)")
+                Text("5H\(wholePercent(snapshot.fiveHourQuotaConsumedDuringRuntime))%")
                     .foregroundStyle(fiveHourQuotaSeriesColor)
             } else {
-                Text("消耗额度：周\(wholePercent(snapshot.quotaConsumedDuringRuntime))% · \(durationText)")
+                Text("周\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
                     .foregroundStyle(quotaSeriesColor)
             }
+            Text(" · \(durationText)")
+                .foregroundStyle(rateSeriesColor)
             if showsRate {
                 Spacer(minLength: 8)
                 Text("速率 \(rateText)")
@@ -509,7 +513,7 @@ private struct UsageChartCanvas: View {
                 context: &context
             )
             drawSeries(snapshot.quotaPoints, maximum: 100, lineColor: quotaSeriesColor, in: plot, context: &context)
-            drawSeries(snapshot.fiveHourQuotaPoints, maximum: 100, lineColor: fiveHourQuotaSeriesColor, in: plot, context: &context)
+            drawSeries(snapshot.fiveHourQuotaPoints, maximum: 100, lineColor: fiveHourQuotaSeriesColor.opacity(0.70), in: plot, context: &context)
             drawSeries(snapshot.cumulativePoints, maximum: snapshot.cumulativeAxisMaximum, lineColor: cumulativeSeriesColor, in: plot, context: &context)
             for index in 0...xAxisGridCells {
                 let x = plot.minX + plot.width * CGFloat(index) / CGFloat(xAxisGridCells)
