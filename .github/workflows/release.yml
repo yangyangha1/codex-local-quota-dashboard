@@ -1,0 +1,82 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Windows executable
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          New-Item -ItemType Directory -Force release | Out-Null
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" `
+            /nologo /target:winexe /optimize+ /win32icon:dashboard.ico `
+            "/out:release/CodexLocalDashboard-v$version.exe" `
+            /reference:System.dll /reference:System.Core.dll `
+            /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
+            /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll `
+            Program.Framework.cs TokenRateChart.cs ProjectDetail.cs `
+            HistoryStore.cs HistoryDashboard.cs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: release/CodexLocalDashboard-v*.exe
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal macOS application archive
+        run: macOS/scripts/package-release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: macOS/dist/CodexQuotaWidget-macOS-v*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mac_archive="$(find release -name 'CodexQuotaWidget-macOS-v*.zip' -print -quit)"
+          mac_hash="$(sha256sum "$mac_archive" | awk '{print $1}')"
+          cat > RELEASE_NOTES.md <<EOF
+          ## 更新内容
+
+          - 增加5H额度统计
+
+          ## macOS 运行方式
+
+          1. 下载并解压 macOS ZIP。
+          2. 将 \`CodexQuotaWidget.app\` 拖入“应用程序”或任意本地目录。
+          3. 本发布包未使用 Apple Developer ID 签名或公证；首次启动若被拦截，请在 Finder 中按住 Control 点击 App 后选择“打开”。
+          4. 如系统仍拒绝打开，请先核对下方 SHA-256，再执行：\`xattr -dr com.apple.quarantine /Applications/CodexQuotaWidget.app\`。
+
+          SHA-256：\`$mac_hash\`
+
+          ## 验证
+
+          - Windows EXE 与 macOS 通用二进制均由此标签构建。
+          - macOS ZIP 仅包含 App bundle，支持 Apple Silicon 与 Intel Mac。
+          EOF
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
