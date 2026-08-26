@@ -2332,7 +2332,7 @@ namespace CodexLocalDashboard
                 var flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
                 var leftWidth = TextRenderer.MeasureText(leftText, font, Size.Empty, flags).Width;
                 var resetWidth = TextRenderer.MeasureText(resetText, font, Size.Empty, flags).Width;
-                preferredLogicalWidth = Math.Max(360, (int)Math.Ceiling((7 * scale + leftWidth + 5 * scale + 110 * scale + 4 * scale + resetWidth + 6 * scale) / scale));
+                preferredLogicalWidth = Math.Max(400, (int)Math.Ceiling((7 * scale + leftWidth + 5 * scale + 110 * scale + resetWidth + 10 * scale) / scale));
                 preferredWidthDirty = false;
                 return preferredLogicalWidth;
             }
@@ -2376,7 +2376,7 @@ namespace CodexLocalDashboard
             var weeklyRemaining = Remaining(weeklyQuota);
             var fiveHourRemaining = Remaining(fiveHourQuota);
             var reset = QuotaResetSummary(data);
-            var progressHeight = Math.Max(3f, 4 * scale);
+            var progressHeight = Math.Max(4.5f, 6 * scale);
             var progressY = (ClientSize.Height - progressHeight) / 2f;
 
             using (var normal = new Font(StripFontFamily, 11f,
@@ -2394,7 +2394,9 @@ namespace CodexLocalDashboard
                 var resetX = ClientSize.Width - resetTextWidth - 5 * scale;
                 var progressWidth = Math.Max(20 * scale, resetX - progressX - 4 * scale);
                 graphics.DrawString(leftText, normal, menuText, new RectangleF(leftX, 0, leftWidth + 2 * scale, ClientSize.Height), centered);
-                graphics.FillRectangle(track, progressX, progressY, progressWidth, progressHeight);
+                using (var trackPath = CapsulePath(new RectangleF(progressX,
+                    progressY, progressWidth, progressHeight)))
+                    graphics.FillPath(track, trackPath);
                 DrawDualQuotaProgress(graphics, new RectangleF(progressX,
                     progressY, progressWidth, progressHeight), weeklyRemaining,
                     fiveHourRemaining);
@@ -2432,7 +2434,7 @@ namespace CodexLocalDashboard
         private static string ResetText(QuotaWindow quota)
         {
             return quota != null && quota.ResetsAt.HasValue
-                ? quota.ResetsAt.Value.ToLocalTime().ToString("M月d日 HH:mm")
+                ? quota.ResetsAt.Value.ToLocalTime().ToString("HH:mm")
                 : "—";
         }
 
@@ -2458,15 +2460,17 @@ namespace CodexLocalDashboard
         {
             if (fraction <= 0d) return;
             var width = (float)(bounds.Width * Math.Min(1d, fraction));
+            var filledBounds = new RectangleF(bounds.Left, bounds.Top, width,
+                bounds.Height);
+            using (var fillPath = CapsulePath(filledBounds))
             using (var fill = new SolidBrush(color))
-                graphics.FillRectangle(fill, bounds.Left, bounds.Top, width,
-                    bounds.Height);
-            if (!patterned) return;
-            var state = graphics.Save();
-            try
             {
-                graphics.SetClip(new RectangleF(bounds.Left, bounds.Top,
-                    width, bounds.Height), CombineMode.Intersect);
+                graphics.FillPath(fill, fillPath);
+                if (!patterned) return;
+                var state = graphics.Save();
+                try
+                {
+                    graphics.SetClip(fillPath, CombineMode.Intersect);
                 using (var stripes = new Pen(Color.FromArgb(100, Color.White),
                     Math.Max(.65f, bounds.Height / 4f)))
                 {
@@ -2477,8 +2481,26 @@ namespace CodexLocalDashboard
                         graphics.DrawLine(stripes, offset, bounds.Bottom,
                             offset + bounds.Height, bounds.Top);
                 }
+                }
+                finally { graphics.Restore(state); }
             }
-            finally { graphics.Restore(state); }
+        }
+
+        private static GraphicsPath CapsulePath(RectangleF bounds)
+        {
+            var path = new GraphicsPath();
+            if (bounds.Width <= 0f || bounds.Height <= 0f) return path;
+            if (bounds.Width <= bounds.Height)
+            {
+                path.AddEllipse(bounds);
+                return path;
+            }
+            var diameter = bounds.Height;
+            path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 90, 180);
+            path.AddArc(bounds.Right - diameter, bounds.Top, diameter,
+                diameter, 270, 180);
+            path.CloseFigure();
+            return path;
         }
 
         private static string ShortWindowName(int minutes)
