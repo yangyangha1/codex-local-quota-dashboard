@@ -415,7 +415,7 @@ struct TokenRateChart: Sendable {
 
             lastSource = remaining
             appendSourcePoint(at: at, value: remaining, breakBefore: false)
-            appendRenderedPoint(at: at, value: stabilize(at: at, rawRemaining: remaining), forceBreakBefore: false)
+            appendRenderedPoint(at: at, value: stabilize(at: at, rawRemaining: remaining))
         }
 
         mutating func appendHold(at: Date) {
@@ -424,7 +424,7 @@ struct TokenRateChart: Sendable {
                 breakBeforeNextPoint = true
                 return
             }
-            appendRenderedPoint(at: at, value: lastRemaining, forceBreakBefore: false)
+            appendRenderedPoint(at: at, value: lastRemaining)
         }
 
         mutating func markDiscontinuous() {
@@ -487,7 +487,7 @@ struct TokenRateChart: Sendable {
             self.resetsAt = resetsAt
             lastCalculationAt = at
             appendSourcePoint(at: at, value: remaining, breakBefore: breakBefore || sourcePoints.isEmpty)
-            appendRenderedPoint(at: at, value: remaining, forceBreakBefore: breakBefore || points.isEmpty)
+            appendRenderedPoint(at: at, value: remaining)
         }
 
         private mutating func stabilize(at: Date, rawRemaining: Double) -> Double {
@@ -501,13 +501,12 @@ struct TokenRateChart: Sendable {
             return previous + alpha * (rawRemaining - previous)
         }
 
-        private mutating func appendRenderedPoint(at: Date, value: Double, forceBreakBefore: Bool) {
-            Self.appendContinuousPoint(
-                &points,
-                at: at,
-                value: value,
-                breakBefore: forceBreakBefore || breakBeforeNextPoint
-            )
+        private mutating func appendRenderedPoint(at: Date, value: Double) {
+            // A quota is a slowly changing percentage. Keep its visible curve
+            // continuous across a temporary missing sample or quota-window
+            // rollover. Source points retain those boundaries for consumption
+            // calculations, while the chart connects the nearest valid values.
+            Self.appendContinuousPoint(&points, at: at, value: value)
             lastRemaining = value
             breakBeforeNextPoint = false
         }
@@ -516,20 +515,20 @@ struct TokenRateChart: Sendable {
             Self.appendPoint(&sourcePoints, at: at, value: value, breakBefore: breakBefore)
         }
 
-        private static func appendContinuousPoint(_ points: inout [ChartPoint], at: Date, value: Double, breakBefore: Bool) {
+        private static func appendContinuousPoint(_ points: inout [ChartPoint], at: Date, value: Double) {
             if let previous = points.last {
                 guard at > previous.at else { return }
                 if samePointBucket(previous.at, at) {
                     points[points.count - 1] = ChartPoint(
                         at: at,
                         value: value,
-                        breakBefore: breakBefore || previous.breakBefore,
+                        breakBefore: previous.breakBefore,
                         sampleCount: 1
                     )
                     return
                 }
             }
-            points.append(ChartPoint(at: at, value: value, breakBefore: breakBefore || points.isEmpty, sampleCount: 1))
+            points.append(ChartPoint(at: at, value: value, breakBefore: points.isEmpty, sampleCount: 1))
         }
 
         private static func appendPoint(_ points: inout [ChartPoint], at: Date, value: Double, breakBefore initialBreak: Bool) {
