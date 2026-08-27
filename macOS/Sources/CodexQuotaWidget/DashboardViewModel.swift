@@ -43,6 +43,7 @@ final class DashboardViewModel: ObservableObject {
     }
     @Published private(set) var launchAtLoginEnabled = LaunchAtLoginController.isEnabled()
     @Published private(set) var secondsRemaining = TokenRateChart.captureIntervalSeconds
+    @Published private(set) var webQuotaEnabled: Bool
 
     var onTopMostChanged: ((Bool) -> Void)?
     var onHideRequested: (() -> Void)?
@@ -56,10 +57,15 @@ final class DashboardViewModel: ObservableObject {
     private var detailLoadID: UUID?
     private var historyLoadTask: Task<Void, Never>?
     private var detailLoadTask: Task<Void, Never>?
+    private var refreshQueued = false
+    private var nextWebQuotaCheckAt = Date.distantPast
+    private var lastWebQuota: QuotaSnapshot?
 
     private static let themeKey = "CodexQuotaWidget.theme"
     private static let transparencyKey = "CodexQuotaWidget.backgroundTransparency"
     private static let topMostKey = "CodexQuotaWidget.topMost"
+    private static let webQuotaEnabledKey = "CodexQuotaWidget.webQuotaEnabled"
+    private static let webQuotaCacheKey = "CodexQuotaWidget.webQuotaSnapshot"
     private static let topMostDefaultMigrationKey = "CodexQuotaWidget.topMost.default.v2"
 
     init() {
@@ -71,6 +77,8 @@ final class DashboardViewModel: ObservableObject {
             defaults.set(true, forKey: Self.topMostDefaultMigrationKey)
         }
         topMost = defaults.object(forKey: Self.topMostKey) as? Bool ?? false
+        webQuotaEnabled = defaults.object(forKey: Self.webQuotaEnabledKey) as? Bool ?? true
+        lastWebQuota = Self.loadWebQuotaCache(defaults)
         historyChart = TokenRateChart()
         historyChart.setDisplayHours(24)
         liveChartSnapshot = liveChart.renderSnapshot()
@@ -96,19 +104,32 @@ final class DashboardViewModel: ObservableObject {
     }
 
     func refresh() {
-        guard !isRefreshing else { return }
+        guard !isRefreshing else {
+            refreshQueued = true
+            return
+        }
         isRefreshing = true
         refreshError = nil
         let scanner = scanner
         let historyStore = historyStore
-        Task.detached(priority: .utility) { [weak self, scanner, historyStore] in
+        Task { [weak self, scanner, historyStore] in
             let capturedAt = Date()
-            let result = scanner.scan()
-            historyStore.record(result, capturedAt: capturedAt)
-            await MainActor.run {
-                self?.apply(snapshot: result, capturedAt: capturedAt)
-            }
+            let localSnapshot = await Task.detached(priority: .utility) {
+                scanner.scan()
+            }.value
+            guard let self else { return }
+            let resolvedSnapshot = await self.resolveQuotaSource(
+                localSnapshot, capturedAt: capturedAt)
+            historyStore.record(resolvedSnapshot, capturedAt: capturedAt)
+            self.apply(snapshot: resolvedSnapshot, capturedAt: capturedAt)
         }
+    }
+
+    func toggleWebQuotaQuery() {
+        webQuotaEnabled.toggle()
+        UserDefaults.standard.set(webQuotaEnabled, forKey: Self.webQuotaEnabledKey)
+        if webQuotaEnabled { nextWebQuotaCheckAt = .distantPast }
+        refresh()
     }
 
     func showLive() {
@@ -294,6 +315,32 @@ final class DashboardViewModel: ObservableObject {
         if secondsRemaining <= 0 { refresh() }
     }
 
+    private func resolveQuotaSource(
+        _ localSnapshot: UsageSnapshot,
+        capturedAt: Date
+    ) async -> UsageSnapshot {
+        // While enabled, a web response is authoritative. Failed requests
+        // keep the last good snapshot instead of letting incomplete local
+        // rate_limits records make the quota graph jump backwards.
+        if webQuotaEnabled && capturedAt >= nextWebQuotaCheckAt {
+            nextWebQuotaCheckAt = capturedAt.addingTimeInterval(10 * 60)
+            if let webSnapshot = await WebQuotaClient.fetch() {
+                lastWebQuota = webSnapshot
+                Self.saveWebQuotaCache(webSnapshot)
+            }
+        }
+        guard let quota = lastWebQuota else {
+            return UsageSnapshot(
+                today: localSnapshot.today, week: localSnapshot.week,
+                month: localSnapshot.month, weekSessions: localSnapshot.weekSessions,
+                quotaAt: nil, quotas: [], projects: localSnapshot.projects)
+        }
+        return UsageSnapshot(
+            today: localSnapshot.today, week: localSnapshot.week,
+            month: localSnapshot.month, weekSessions: localSnapshot.weekSessions,
+            quotaAt: quota.at, quotas: quota.windows, projects: localSnapshot.projects)
+    }
+
     private func apply(snapshot: UsageSnapshot, capturedAt: Date) {
         self.snapshot = snapshot
         liveChart.capture(
@@ -309,6 +356,47 @@ final class DashboardViewModel: ObservableObject {
         liveChartSnapshot = liveChart.renderSnapshot(now: capturedAt)
         secondsRemaining = TokenRateChart.captureIntervalSeconds
         isRefreshing = false
+        if refreshQueued {
+            refreshQueued = false
+            refresh()
+        }
+    }
+
+    private static func loadWebQuotaCache(_ defaults: UserDefaults) -> QuotaSnapshot? {
+        guard
+            let value = defaults.dictionary(forKey: webQuotaCacheKey),
+            let at = number(value["at"]), at > 0,
+            let rawWindows = value["windows"] as? [[String: Any]]
+        else { return nil }
+        let windows = rawWindows.compactMap { value -> QuotaWindow? in
+            guard let minutes = number(value["minutes"]), minutes > 0,
+                  let used = number(value["used"])
+            else { return nil }
+            let reset = number(value["reset"]).flatMap {
+                $0 > 0 ? Date(timeIntervalSince1970: $0) : nil
+            }
+            return QuotaWindow(windowMinutes: Int(minutes),
+                               usedPercent: min(100, max(0, used)),
+                               resetsAt: reset)
+        }
+        return windows.isEmpty ? nil : QuotaSnapshot(
+            at: Date(timeIntervalSince1970: at), windows: windows)
+    }
+
+    private static func saveWebQuotaCache(_ snapshot: QuotaSnapshot) {
+        let windows: [[String: Any]] = snapshot.windows.map { quota in
+            ["minutes": quota.windowMinutes, "used": quota.usedPercent,
+             "reset": quota.resetsAt?.timeIntervalSince1970 ?? 0]
+        }
+        UserDefaults.standard.set(
+            ["at": snapshot.at.timeIntervalSince1970, "windows": windows],
+            forKey: webQuotaCacheKey)
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        if let value = value as? NSNumber { return value.doubleValue }
+        if let value = value as? String { return Double(value) }
+        return nil
     }
 
     private func beginHistoryLoad() {

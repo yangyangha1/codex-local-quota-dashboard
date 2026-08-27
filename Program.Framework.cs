@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,8 +21,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.6.2.0")]
-[assembly: AssemblyFileVersion("1.6.2.0")]
+[assembly: AssemblyVersion("1.6.3.0")]
+[assembly: AssemblyFileVersion("1.6.3.0")]
 
 namespace CodexLocalDashboard
 {
@@ -48,7 +49,7 @@ namespace CodexLocalDashboard
 
     internal sealed class DashboardForm : Form
     {
-        private const string DisplayVersion = "v1.6.2";
+        private const string DisplayVersion = "v1.6.3";
         private const int DesignWidth = 320;
         private const int DesignHeight = 347;
         private readonly UsageScanner scanner = new UsageScanner();
@@ -81,6 +82,7 @@ namespace CodexLocalDashboard
         private bool dragging;
         private bool exiting;
         private bool refreshing;
+        private bool refreshQueued;
         private int secondsRemaining = 30;
         private float lastScale;
         private float dpiScale = 1f;
@@ -92,6 +94,7 @@ namespace CodexLocalDashboard
         private IntPtr ownedCodexWindow;
         private UsageSnapshot latestSnapshot;
         private ToolStripMenuItem switchModeItem;
+        private ToolStripMenuItem webQuotaMenuItem;
         private ToolStripMenuItem topmostMenuItem;
         private ToolStripMenuItem darkThemeItem;
         private ToolStripMenuItem lightThemeItem;
@@ -115,6 +118,11 @@ namespace CodexLocalDashboard
         private ProjectDetailPointerHint lastDetailPointerHint;
         private HistoryPanelPointerHint lastHistoryPanelPointerHint;
         private bool lastHistoryButtonPointer;
+        // Web quota is authoritative while enabled. The scanner still
+        // supplies token statistics, but cannot replace it with partial logs.
+        private volatile bool webQuotaEnabled = WebQuotaPreferences.Load();
+        private DateTimeOffset nextWebQuotaCheckAt = DateTimeOffset.MinValue;
+        private QuotaSnapshot lastWebQuota = WebQuotaCache.Load();
         private ThemeMode CurrentTheme { get { return (ThemeMode)themeModeValue; } }
         private static readonly uint OwnProcessId = unchecked((uint)Process.GetCurrentProcess().Id);
         private static int detailMemoryCleanupPending;
@@ -498,7 +506,11 @@ namespace CodexLocalDashboard
 
         private async void RefreshData()
         {
-            if (refreshing) return;
+            if (refreshing)
+            {
+                refreshQueued = true;
+                return;
+            }
             refreshing = true;
             try
             {
@@ -506,6 +518,7 @@ namespace CodexLocalDashboard
                     () =>
                     {
                         var value = scanner.Scan(refreshCancellation.Token);
+                        value = ResolveQuotaSource(value);
                         try
                         {
                             historyStore.Record(value, DateTimeOffset.Now);
@@ -536,7 +549,51 @@ namespace CodexLocalDashboard
                 }
                 secondsRemaining = TokenRateChart.CaptureIntervalSeconds;
             }
-            finally { refreshing = false; }
+            finally
+            {
+                refreshing = false;
+                if (refreshQueued && !refreshCancellation.IsCancellationRequested &&
+                    !IsDisposed)
+                {
+                    refreshQueued = false;
+                    BeginInvoke((Action)RefreshData);
+                }
+            }
+        }
+
+        private UsageSnapshot ResolveQuotaSource(UsageSnapshot localSnapshot)
+        {
+            // This runs on the serial refresh worker. A failed request keeps
+            // the last web snapshot and never falls back to stale JSONL quota.
+            var now = DateTimeOffset.Now;
+            if (webQuotaEnabled && now >= nextWebQuotaCheckAt)
+            {
+                nextWebQuotaCheckAt = now.AddMinutes(10);
+                QuotaSnapshot webSnapshot;
+                if (WebQuotaClient.TryRead(out webSnapshot))
+                {
+                    lastWebQuota = webSnapshot;
+                    WebQuotaCache.Save(webSnapshot);
+                }
+            }
+
+            // Disabling queries stops network traffic; it does not grant local
+            // JSONL rate_limits permission to replace the web quota cache.
+            var quota = lastWebQuota;
+            return new UsageSnapshot(
+                localSnapshot.Today, localSnapshot.Week, localSnapshot.Month,
+                localSnapshot.WeekSessions,
+                quota == null ? DateTimeOffset.MinValue : quota.At,
+                quota == null ? new List<QuotaWindow>() : quota.Windows,
+                localSnapshot.Projects);
+        }
+
+        private void SetWebQuotaEnabled(bool enabled)
+        {
+            webQuotaEnabled = enabled;
+            WebQuotaPreferences.Save(enabled);
+            if (enabled) nextWebQuotaCheckAt = DateTimeOffset.MinValue;
+            RefreshData();
         }
 
         private void TrimInitialWorkingSet()
@@ -633,6 +690,16 @@ namespace CodexLocalDashboard
             switchModeItem = new ToolStripMenuItem("切换为 Codex 顶部横条");
             switchModeItem.Click += delegate { ToggleDisplayMode(); };
             menu.Items.Add(switchModeItem);
+            webQuotaMenuItem = new ToolStripMenuItem("网页额度查询")
+            {
+                Checked = webQuotaEnabled,
+                CheckOnClick = true
+            };
+            webQuotaMenuItem.CheckedChanged += delegate
+            {
+                SetWebQuotaEnabled(webQuotaMenuItem.Checked);
+            };
+            menu.Items.Add(webQuotaMenuItem);
             darkThemeItem = new ToolStripMenuItem("深色");
             lightThemeItem = new ToolStripMenuItem("浅色");
             darkThemeItem.Click += delegate { ApplyTheme(ThemeMode.Dark); };
@@ -2224,7 +2291,7 @@ namespace CodexLocalDashboard
                     : (fiveHourValue ?? 0d) / 100d;
                 var baseValue = weeklyValue ?? fiveHourValue ?? 0d;
                 FillCapsule(graphics, trackPath, bounds, baseFraction,
-                    Ui.QuotaColor(baseValue), false);
+                    Color.FromArgb(75, 205, 143), false);
                 // The 5H fill is normalized inside the weekly remaining
                 // width.  A full 5H allowance therefore never paints beyond
                 // the weekly allowance that is still available underneath.
@@ -2444,9 +2511,8 @@ namespace CodexLocalDashboard
             var overlayFraction = hasWeekly
                 ? baseFraction * (fiveHourRemaining ?? 0d) / 100d
                 : (fiveHourRemaining ?? 0d) / 100d;
-            var baseValue = weeklyRemaining ?? fiveHourRemaining ?? 0d;
             FillProgress(graphics, bounds, baseFraction,
-                Ui.QuotaColor(baseValue), false);
+                Color.FromArgb(75, 205, 143), false);
             FillProgress(graphics, bounds, overlayFraction,
                 Color.FromArgb(204, 242, 125, 43), true);
         }

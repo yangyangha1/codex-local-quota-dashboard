@@ -31,6 +31,7 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
         statusMenu.autoenablesItems = false
         _ = addMenuItem("显示悬浮面板", action: #selector(showWidget(_:)))
         _ = addMenuItem("立即刷新", action: #selector(refresh(_:)))
+        _ = addMenuItem("网页额度查询", action: #selector(toggleWebQuotaQuery(_:)))
         statusMenu.addItem(.separator())
         _ = addMenuItem("切换深色／浅色", action: #selector(toggleTheme(_:)))
         _ = addMenuItem("背景透明度：0%", action: #selector(setTransparency(_:)), representedObject: 0)
@@ -79,6 +80,10 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showWidget(_ sender: Any?) { widget.show() }
     @objc private func hideWidget(_ sender: Any?) { widget.hide() }
     @objc private func refresh(_ sender: Any?) { widget.model.refresh() }
+    @objc private func toggleWebQuotaQuery(_ sender: NSMenuItem) {
+        widget.model.toggleWebQuotaQuery()
+        sender.state = widget.model.webQuotaEnabled ? .on : .off
+    }
     @objc private func toggleTheme(_ sender: Any?) {
         widget.model.theme = widget.model.theme == .dark ? .light : .dark
     }
@@ -98,6 +103,9 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit(_ sender: Any?) { NSApp.terminate(nil) }
 
     private func refreshMenuState() {
+        for item in statusMenu.items where item.title == "网页额度查询" {
+            item.state = widget.model.webQuotaEnabled ? .on : .off
+        }
         for item in statusMenu.items where item.title == "窗口置顶" {
             item.state = widget.model.topMost ? .on : .off
         }

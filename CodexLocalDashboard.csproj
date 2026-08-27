@@ -5,12 +5,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>CodexLocalDashboard-v1.6.2</AssemblyName>
+    <AssemblyName>CodexLocalDashboard-v1.6.3</AssemblyName>
     <RootNamespace>CodexLocalDashboard</RootNamespace>
     <ApplicationIcon>dashboard.ico</ApplicationIcon>
-    <Version>1.6.2</Version>
-    <AssemblyVersion>1.6.2.0</AssemblyVersion>
-    <FileVersion>1.6.2.0</FileVersion>
+    <Version>1.6.3</Version>
+    <AssemblyVersion>1.6.3.0</AssemblyVersion>
+    <FileVersion>1.6.3.0</FileVersion>
     <Product>Codex Local Quota Dashboard</Product>
     <Description>Offline Windows dashboard for locally cached Codex quota and token usage.</Description>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
@@ -24,6 +24,8 @@
     <Compile Include="ProjectDetail.cs" />
     <Compile Include="HistoryStore.cs" />
     <Compile Include="HistoryDashboard.cs" />
+    <Compile Include="WebQuotaClient.cs" />
     <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Runtime.Serialization" />
   </ItemGroup>
 </Project>

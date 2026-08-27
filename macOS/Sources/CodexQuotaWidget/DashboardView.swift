@@ -359,7 +359,7 @@ private struct DualQuotaProgressBar: View {
                 Capsule().fill(track)
                 if baseFraction > 0 {
                     Capsule()
-                        .fill(quotaColor(weeklyValue ?? fiveHourValue ?? 0))
+                        .fill(quotaSeriesColor)
                         .frame(width: max(0, geometry.size.width * baseFraction))
                 }
                 if overlayFraction > 0 {
@@ -391,35 +391,6 @@ private struct FiveHourQuotaPattern: View {
         }
         .allowsHitTesting(false)
     }
-}
-
-private func quotaColor(_ remaining: Double) -> Color {
-    // Exact continuous upstream stops: red at 0%, moving through
-    // orange/yellow to green at 100%, rather than discrete bands.
-    let value = min(100, max(0, remaining))
-    let stops: [Double] = [0, 10, 30, 35, 50, 65, 80, 100]
-    let colors: [(Double, Double, Double)] = [
-        (211, 61, 61),
-        (224, 75, 68),
-        (229, 103, 58),
-        (232, 145, 53),
-        (224, 174, 57),
-        (164, 197, 72),
-        (91, 201, 117),
-        (73, 205, 143)
-    ]
-    for index in 0..<(stops.count - 1) where value <= stops[index + 1] {
-        let amount = (value - stops[index]) / (stops[index + 1] - stops[index])
-        let from = colors[index]
-        let to = colors[index + 1]
-        return Color(
-            red: (from.0 + (to.0 - from.0) * amount) / 255,
-            green: (from.1 + (to.1 - from.1) * amount) / 255,
-            blue: (from.2 + (to.2 - from.2) * amount) / 255
-        )
-    }
-    let end = colors[colors.count - 1]
-    return Color(red: end.0 / 255, green: end.1 / 255, blue: end.2 / 255)
 }
 
 private struct WidgetButtonStyle: ButtonStyle {
@@ -480,7 +451,7 @@ private struct ChartInfoLine: View {
                     .foregroundStyle(fiveHourQuotaSeriesColor)
                 Text("/").foregroundStyle(rateSeriesColor)
             }
-            Text("7d\(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
+            Text("7d \(wholePercent(snapshot.quotaConsumedDuringRuntime))%")
                 .foregroundStyle(quotaSeriesColor)
         }
     }

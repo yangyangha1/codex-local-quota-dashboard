@@ -4,7 +4,7 @@
   <img src="dashboard-icon-master.png" width="112" alt="Codex Local Quota Dashboard icon">
 </p>
 
-一个面向 Windows 的 Codex 额度与 Token 用量仪表盘，并提供同一功能逻辑的原生 macOS 悬浮面板。两版都只读取本机 Codex 日志：不需要账号、API Key 或网络访问，也不会上传提示词、会话内容或用量数据。
+一个面向 Windows 的 Codex 额度与 Token 用量仪表盘，并提供同一功能逻辑的原生 macOS 悬浮面板。两版从本机 Codex 日志统计 Token；默认会使用已登录 Codex 的本地凭据查询官方网页额度，但不会上传提示词、会话内容或用量数据。
 
 > [!NOTE]
 > macOS 原生实现位于 [`macOS/`](macOS/)。它是独立、可移动和可缩放的桌面悬浮面板；原 Windows 的 Codex 顶部横条/窗口贴附模式不会在 macOS 上出现。
@@ -13,14 +13,14 @@
 
 ### Windows
 
-1. 获取 `CodexLocalDashboard-v1.6.2.exe`。
+1. 从 [Releases 页面](https://github.com/yangyangha1/codex-local-quota-dashboard/releases) 获取已发布的 EXE，或按下方步骤自行编译当前 1.6.3 源码。
 2. 双击运行，程序会自动扫描 `%USERPROFILE%\\.codex\\sessions` 和 `archived_sessions`，无需安装和登录。
-3. 仪表盘会显示最近的本地 5H／7d 额度快照、各自重置时间，以及今日、近 7 天和近 30 天 Token 用量。
-4. 左键点击托盘图标可直接显示缓存快照仪表盘；在仪表盘任意位置点击右键，可调整主题、透明度、置顶和隐藏。
+3. 启动时会查询官方网页的 5H／7d 额度，此后每 10 分钟更新一次；Token 用量仍只从本机日志读取。
+4. 左键点击托盘图标可直接显示仪表盘；在仪表盘任意位置点击右键，可关闭“网页额度查询”、调整主题、透明度、置顶和隐藏。
 
 ### macOS 14 或更新版本
 
-1. 在 [v1.6.2 Release](https://github.com/yangyangha1/codex-local-quota-dashboard/releases/tag/v1.6.2) 下载 `CodexQuotaWidget-macOS-v1.6.2.zip`。
+1. 在 [Releases 页面](https://github.com/yangyangha1/codex-local-quota-dashboard/releases) 下载最新 `CodexQuotaWidget-macOS` ZIP。
 2. 解压后将 `CodexQuotaWidget.app` 拖入“应用程序”文件夹，或保留在任意本地目录后双击运行。
 3. 当前公开包**没有 Apple Developer ID 签名或公证**。首次启动被系统拦截时，在 Finder 中按住 Control 点击 App，选择“打开”并在确认框中再次选择“打开”；也可前往“系统设置 → 隐私与安全性”选择“仍要打开”。
 4. 菜单栏额度图标左键可查看当前 5H／7d 额度摘要，右键可设置主题、透明度、置顶、隐藏与开机自动启动。实时页面除“历史／明细”按钮外的任意位置均可拖动面板；只有历史图表支持框选放大。
@@ -66,8 +66,8 @@ cd macOS
 
 ## 功能特点
 
-- **完全本地读取**：扫描本机 `.codex/sessions` 和 `archived_sessions`；不会联网或上传数据。
-- **额度快照**：显示本地日志中最近记录的 5H／7d 额度剩余百分比和各自重置时间；该值不是服务端实时查询结果。
+- **网页额度优先**：默认在启动时及每 10 分钟以本机 Codex 登录凭据请求官方网页的 5H／7d 额度；右键菜单可关闭。请求失败会静默保持上次成功的网页快照，不会用残缺本地日志使曲线跳变。
+- **本地 Token 统计**：扫描本机 `.codex/sessions` 和 `archived_sessions`；不会上传提示词、会话内容或用量数据。
 - **用量统计和图表**：汇总今日、近 7 天、近 30 天 Token；同时绘制 7d 额度、橙色 5H 额度、速率和累计 Token，并保留 1h～48h 时间轴。
 - **本地历史数据**：每 30 秒缓冲一个隐私最小化的数据点，每 5 分钟批量写入；Windows 和 macOS 均使用 104 字节 `CLDHST04` v4 记录保存双额度，并继续读取旧 96 字节 v3 文件；超过 8 MB 后分级压缩。
 - **按需项目明细**：仅在打开明细时读取项目、会话、模型、Token 构成和工具调用；普通界面不常驻这些对象。
@@ -76,10 +76,11 @@ cd macOS
 
 ## 隐私与数据来源
 
-应用只读取本机 Codex 已生成的 JSONL 会话日志，不会发起网络请求。它不会读取或显示提示词正文，只解析本地日志里的 Token 计数与限额快照字段。
+应用从本机 Codex 已生成的 JSONL 会话日志读取 Token 计数；在“网页额度查询”开启时，还会读取本机 `.codex/auth.json` 中已有的登录凭据，以 HTTPS 请求官方网页额度接口。凭据仅用于该请求，不会写入历史文件、显示或上传给第三方；应用不会读取或显示提示词正文。
 
 > [!IMPORTANT]
-> 显示的额度是 Codex 最近一次写入本地日志的缓存快照，并非 OpenAI 服务端的实时额度。若近期没有产生新的 Codex 日志，数据可能暂时滞后。
+> [!IMPORTANT]
+> 默认显示的 5H／7d 额度以官方网页查询结果为准。网页查询暂时失败时，应用会继续显示上次成功的网页快照；不会改用本地日志的限额字段。关闭此开关后，才显示本地日志缓存快照。
 
 ## 系统要求
 
@@ -103,14 +104,14 @@ msbuild CodexLocalDashboard.csproj /p:Configuration=Release
   /out:CodexLocalDashboard.exe `
   /reference:System.dll /reference:System.Core.dll `
   /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
-  /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll `
+  /reference:Microsoft.CSharp.dll /reference:System.Web.Extensions.dll /reference:System.Runtime.Serialization.dll `
   Program.Framework.cs TokenRateChart.cs ProjectDetail.cs `
-  HistoryStore.cs HistoryDashboard.cs
+  HistoryStore.cs HistoryDashboard.cs WebQuotaClient.cs
 ```
 
 ## 已知限制
 
-- 无法在离线状态下得知服务端实时剩余额度，只能展示最近的本地缓存快照。
+- 网页额度查询关闭、未登录 Codex 或网络不可用时，只能展示本地缓存快照；开启时失败会保留上次成功的网页快照。
 - 本地统计取决于 Codex 日志格式；如果未来日志结构发生变化，可能需要更新解析规则。
 - macOS 发布包未经 Apple Developer ID 签名或公证；首次运行需按上述方式在系统安全提示中确认。
 

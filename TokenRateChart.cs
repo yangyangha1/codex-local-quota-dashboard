@@ -1384,7 +1384,7 @@ namespace CodexLocalDashboard
                     var hasFiveHourQuota = snapshot.CurrentFiveHourQuota.HasValue;
                     var consumptionPrefixText = ((int)snapshot.DisplayDuration.TotalHours)
                         .ToString(CultureInfo.InvariantCulture) + "H消耗";
-                    var weeklyConsumptionText = "7d" +
+                    var weeklyConsumptionText = "7d " +
                         FormatPercent(snapshot.QuotaConsumedDuringRuntime);
                     var quotaSeparatorText = hasFiveHourQuota ? "/" : string.Empty;
                     var fiveHourConsumptionText = hasFiveHourQuota
