@@ -21,8 +21,8 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyProduct("Codex Local Quota Dashboard")]
 [assembly: AssemblyCompany("yangyangha1")]
 [assembly: AssemblyCopyright("Copyright © 2026 yangyangha1")]
-[assembly: AssemblyVersion("1.6.3.0")]
-[assembly: AssemblyFileVersion("1.6.3.0")]
+[assembly: AssemblyVersion("1.7.0.0")]
+[assembly: AssemblyFileVersion("1.7.0.0")]
 
 namespace CodexLocalDashboard
 {
@@ -49,7 +49,7 @@ namespace CodexLocalDashboard
 
     internal sealed class DashboardForm : Form
     {
-        private const string DisplayVersion = "v1.6.3";
+        private const string DisplayVersion = "v1.7.0";
         private const int DesignWidth = 320;
         private const int DesignHeight = 347;
         private readonly UsageScanner scanner = new UsageScanner();
@@ -2190,7 +2190,7 @@ namespace CodexLocalDashboard
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             using (var brush = new SolidBrush(ForeColor))
             using (var fiveHourBrush = new SolidBrush(
-                Color.FromArgb(242, 125, 43)))
+                Color.FromArgb(163, 107, 199)))
             using (var weeklyBrush = new SolidBrush(
                 Color.FromArgb(75, 205, 143)))
             {
@@ -2296,7 +2296,7 @@ namespace CodexLocalDashboard
                 // width.  A full 5H allowance therefore never paints beyond
                 // the weekly allowance that is still available underneath.
                 FillCapsule(graphics, trackPath, bounds, overlayFraction,
-                    Color.FromArgb(204, 242, 125, 43), true);
+                    Color.FromArgb(204, 163, 107, 199), true);
             }
         }
 
@@ -2514,7 +2514,7 @@ namespace CodexLocalDashboard
             FillProgress(graphics, bounds, baseFraction,
                 Color.FromArgb(75, 205, 143), false);
             FillProgress(graphics, bounds, overlayFraction,
-                Color.FromArgb(204, 242, 125, 43), true);
+                Color.FromArgb(204, 163, 107, 199), true);
         }
 
         private static void FillProgress(Graphics graphics, RectangleF bounds,

@@ -13,7 +13,7 @@
 
 ### Windows
 
-1. 从 [Releases 页面](https://github.com/yangyangha1/codex-local-quota-dashboard/releases) 获取已发布的 EXE，或按下方步骤自行编译当前 1.6.3 源码。
+1. 从 [Releases 页面](https://github.com/yangyangha1/codex-local-quota-dashboard/releases) 获取已发布的 EXE，或按下方步骤自行编译当前 1.7.0 源码。
 2. 双击运行，程序会自动扫描 `%USERPROFILE%\\.codex\\sessions` 和 `archived_sessions`，无需安装和登录。
 3. 启动时会查询官方网页的 5H／7d 额度，此后每 10 分钟更新一次；Token 用量仍只从本机日志读取。
 4. 左键点击托盘图标可直接显示仪表盘；在仪表盘任意位置点击右键，可关闭“网页额度查询”、调整主题、透明度、置顶和隐藏。

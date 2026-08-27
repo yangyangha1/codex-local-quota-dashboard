@@ -1342,8 +1342,8 @@ namespace CodexLocalDashboard
                 Color.FromArgb(42, 176, 188, 201);
             var quotaColor = light ? Color.FromArgb(27, 151, 101) :
                 Color.FromArgb(75, 205, 143);
-            var fiveHourQuotaColor = light ? Color.FromArgb(211, 104, 27) :
-                Color.FromArgb(242, 125, 43);
+            var fiveHourQuotaColor = light ? Color.FromArgb(135, 87, 184) :
+                Color.FromArgb(181, 138, 230);
             var fiveHourQuotaLineColor = Color.FromArgb(179,
                 fiveHourQuotaColor);
             var tokenColor = light ? Color.FromArgb(32, 117, 178) :

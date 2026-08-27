@@ -150,7 +150,7 @@ namespace CodexLocalDashboard
                 request.Timeout = 8000;
                 request.ReadWriteTimeout = 8000;
                 request.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
-                request.UserAgent = "CodexLocalQuotaDashboard/1.6.3";
+                request.UserAgent = "CodexLocalQuotaDashboard/1.7.0";
                 request.Headers[HttpRequestHeader.Authorization] = "Bearer " + accessToken;
                 var accountId = tokens == null ? null : tokens.AccountId;
                 if (!string.IsNullOrWhiteSpace(accountId))

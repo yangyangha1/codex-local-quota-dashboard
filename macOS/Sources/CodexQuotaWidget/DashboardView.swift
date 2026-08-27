@@ -412,7 +412,7 @@ private struct WidgetButtonStyle: ButtonStyle {
 }
 
 private let quotaSeriesColor = Color(red: 0.20, green: 0.72, blue: 0.47)
-private let fiveHourQuotaSeriesColor = Color(red: 0.95, green: 0.49, blue: 0.17)
+private let fiveHourQuotaSeriesColor = Color(red: 0.64, green: 0.42, blue: 0.78)
 private let rateSeriesColor = Color.gray
 private let cumulativeSeriesColor = Color(red: 0.27, green: 0.62, blue: 0.96)
 private let rateAreaColor = Color(red: 0.63, green: 0.48, blue: 0.84)

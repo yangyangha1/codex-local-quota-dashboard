@@ -22,7 +22,7 @@ enum WebQuotaClient {
             if let accountID = tokens["account_id"] as? String, !accountID.isEmpty {
                 request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
             }
-            request.setValue("CodexLocalQuotaDashboard/1.6.3", forHTTPHeaderField: "User-Agent")
+            request.setValue("CodexLocalQuotaDashboard/1.7.0", forHTTPHeaderField: "User-Agent")
 
             let (data, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200,
