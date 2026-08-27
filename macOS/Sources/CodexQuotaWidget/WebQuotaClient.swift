@@ -18,7 +18,9 @@ enum WebQuotaClient {
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
             request.timeoutInterval = 8
+            request.cachePolicy = .reloadIgnoringLocalCacheData
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
             if let accountID = tokens["account_id"] as? String, !accountID.isEmpty {
                 request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
             }
