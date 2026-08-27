@@ -67,11 +67,11 @@ final class DashboardViewModel: ObservableObject {
     private static let topMostKey = "CodexQuotaWidget.topMost"
     private static let webQuotaEnabledKey = "CodexQuotaWidget.webQuotaEnabled"
     private static let webQuotaCacheKey = "CodexQuotaWidget.webQuotaSnapshot"
+    private static let resolvedQuotaCacheKey = "CodexQuotaWidget.resolvedQuotaSnapshot"
     private static let topMostDefaultMigrationKey = "CodexQuotaWidget.topMost.default.v2"
     private static let webQuotaRefreshInterval: TimeInterval = 10 * 60
     private static let maximumWebQuotaAge: TimeInterval = 15 * 60
     private static let maximumLocalQuotaAge: TimeInterval = 5 * 60
-    private static let localQuotaBacktrackTolerance = 1.0
     private static let localQuotaMinimumDriftTolerance = 2.5
     private static let localQuotaDriftPerMinute = 1.5
     private static let localQuotaMaximumDriftTolerance = 15.0
@@ -86,7 +86,8 @@ final class DashboardViewModel: ObservableObject {
         }
         topMost = defaults.object(forKey: Self.topMostKey) as? Bool ?? false
         webQuotaEnabled = defaults.object(forKey: Self.webQuotaEnabledKey) as? Bool ?? true
-        lastWebQuota = Self.loadWebQuotaCache(defaults)
+        lastWebQuota = Self.loadQuotaCache(defaults, forKey: Self.webQuotaCacheKey)
+        lastResolvedQuota = Self.loadQuotaCache(defaults, forKey: Self.resolvedQuotaCacheKey)
         historyChart = TokenRateChart()
         historyChart.setDisplayHours(24)
         liveChartSnapshot = liveChart.renderSnapshot()
@@ -121,15 +122,16 @@ final class DashboardViewModel: ObservableObject {
         let scanner = scanner
         let historyStore = historyStore
         Task { [weak self, scanner, historyStore] in
-            let capturedAt = Date()
             let localSnapshot = await Task.detached(priority: .utility) {
                 scanner.scan()
             }.value
             guard let self else { return }
+            let scanCompletedAt = Date()
             let resolvedSnapshot = await self.resolveQuotaSource(
-                localSnapshot, capturedAt: capturedAt)
-            historyStore.record(resolvedSnapshot, capturedAt: capturedAt)
-            self.apply(snapshot: resolvedSnapshot, capturedAt: capturedAt)
+                localSnapshot, capturedAt: scanCompletedAt)
+            let appliedAt = Date()
+            historyStore.record(resolvedSnapshot, capturedAt: appliedAt)
+            self.apply(snapshot: resolvedSnapshot, capturedAt: appliedAt)
         }
     }
 
@@ -334,33 +336,45 @@ final class DashboardViewModel: ObservableObject {
             return localSnapshot
         }
 
-        var webRequestFailed = false
+        var needsLocalFallback = false
         if capturedAt >= nextWebQuotaCheckAt {
             nextWebQuotaCheckAt = capturedAt.addingTimeInterval(Self.webQuotaRefreshInterval)
-            if let webSnapshot = await WebQuotaClient.fetch() {
+            if let webSnapshot = await WebQuotaClient.fetch(),
+               Self.isTrustedWebQuota(
+                   webSnapshot,
+                   after: lastResolvedQuota ?? lastWebQuota
+               ) {
                 lastWebQuota = webSnapshot
-                Self.saveWebQuotaCache(webSnapshot)
-                lastResolvedQuota = webSnapshot
-                return Self.replacingQuota(in: localSnapshot, with: webSnapshot)
+                Self.saveQuotaCache(webSnapshot, forKey: Self.webQuotaCacheKey)
+                return acceptResolvedQuota(webSnapshot, in: localSnapshot)
             }
-            webRequestFailed = true
+            // A failed or internally inconsistent response must not make the
+            // graph regress. Treat it like a temporary web failure and let a
+            // complete, newer local record take over quietly.
+            needsLocalFallback = true
         }
 
-        // If this web refresh failed, a fresh complete local snapshot is the
-        // authority for the interval. It is safer than presenting a stale web
-        // value, but incomplete local data is still rejected below.
-        if webRequestFailed,
-           let localQuota = Self.freshLocalQuota(from: localSnapshot, capturedAt: capturedAt) {
-            lastResolvedQuota = localQuota
-            return Self.replacingQuota(in: localSnapshot, with: localQuota)
+        // If the web request failed, use the local source silently, but only
+        // when it is complete, fresh, newer than the confirmed value and does
+        // not recover quota without an explicitly newer reset_at.
+        if needsLocalFallback,
+           let localQuota = Self.trustedFallbackLocalQuota(
+               from: localSnapshot,
+               after: lastResolvedQuota ?? lastWebQuota,
+               capturedAt: capturedAt
+           ) {
+            return acceptResolvedQuota(localQuota, in: localSnapshot)
         }
 
         guard let webQuota = lastWebQuota,
               capturedAt.timeIntervalSince(webQuota.at) <= Self.maximumWebQuotaAge
         else {
-            if let localQuota = Self.freshLocalQuota(from: localSnapshot, capturedAt: capturedAt) {
-                lastResolvedQuota = localQuota
-                return Self.replacingQuota(in: localSnapshot, with: localQuota)
+            if let localQuota = Self.trustedFallbackLocalQuota(
+                from: localSnapshot,
+                after: lastResolvedQuota ?? lastWebQuota,
+                capturedAt: capturedAt
+            ) {
+                return acceptResolvedQuota(localQuota, in: localSnapshot)
             }
             if let lastResolvedQuota {
                 return Self.replacingQuota(in: localSnapshot, with: lastResolvedQuota)
@@ -375,13 +389,22 @@ final class DashboardViewModel: ObservableObject {
         if let localQuota = Self.trustedLocalQuota(
             from: localSnapshot,
             relativeTo: webQuota,
+            after: lastResolvedQuota,
             capturedAt: capturedAt
         ) {
-            lastResolvedQuota = localQuota
-            return Self.replacingQuota(in: localSnapshot, with: localQuota)
+            return acceptResolvedQuota(localQuota, in: localSnapshot)
         }
 
         let quota = lastResolvedQuota ?? webQuota
+        return Self.replacingQuota(in: localSnapshot, with: quota)
+    }
+
+    private func acceptResolvedQuota(
+        _ quota: QuotaSnapshot,
+        in localSnapshot: UsageSnapshot
+    ) -> UsageSnapshot {
+        lastResolvedQuota = quota
+        Self.saveQuotaCache(quota, forKey: Self.resolvedQuotaCacheKey)
         return Self.replacingQuota(in: localSnapshot, with: quota)
     }
 
@@ -398,10 +421,14 @@ final class DashboardViewModel: ObservableObject {
     private static func trustedLocalQuota(
         from localSnapshot: UsageSnapshot,
         relativeTo webQuota: QuotaSnapshot,
+        after lastResolvedQuota: QuotaSnapshot?,
         capturedAt: Date
     ) -> QuotaSnapshot? {
         guard let localQuota = freshLocalQuota(from: localSnapshot, capturedAt: capturedAt),
-              localQuota.windows.count == webQuota.windows.count
+              isStrictlyNewer(localQuota, than: webQuota),
+              isStrictlyNewer(localQuota, than: lastResolvedQuota),
+              hasMatchingWindows(localQuota, webQuota),
+              isNonRegressing(localQuota, after: lastResolvedQuota)
         else { return nil }
 
         let minutesSinceWeb = max(0, capturedAt.timeIntervalSince(webQuota.at) / 60)
@@ -415,13 +442,92 @@ final class DashboardViewModel: ObservableObject {
                 $0.windowMinutes == webWindow.windowMinutes
             }) else { return nil }
 
+            if confirmsNewReset(localWindow, after: webWindow) {
+                continue
+            }
+
+            guard localWindow.resetsAt == webWindow.resetsAt else { return nil }
             let usedDifference = localWindow.usedPercent - webWindow.usedPercent
-            guard usedDifference >= -localQuotaBacktrackTolerance,
-                  abs(usedDifference) <= permittedDrift
+            guard usedDifference >= 0,
+                  usedDifference <= permittedDrift
             else { return nil }
         }
 
         return localQuota
+    }
+
+    private static func trustedFallbackLocalQuota(
+        from localSnapshot: UsageSnapshot,
+        after confirmedQuota: QuotaSnapshot?,
+        capturedAt: Date
+    ) -> QuotaSnapshot? {
+        guard let localQuota = freshLocalQuota(from: localSnapshot, capturedAt: capturedAt),
+              isStrictlyNewer(localQuota, than: confirmedQuota),
+              isNonRegressing(localQuota, after: confirmedQuota)
+        else { return nil }
+        return localQuota
+    }
+
+    private static func isTrustedWebQuota(
+        _ candidate: QuotaSnapshot,
+        after confirmedQuota: QuotaSnapshot?
+    ) -> Bool {
+        guard !candidate.windows.isEmpty,
+              isStrictlyNewer(candidate, than: confirmedQuota),
+              isNonRegressing(candidate, after: confirmedQuota)
+        else { return false }
+        return true
+    }
+
+    private static func isStrictlyNewer(
+        _ candidate: QuotaSnapshot,
+        than reference: QuotaSnapshot?
+    ) -> Bool {
+        guard let reference else { return true }
+        return candidate.at > reference.at
+    }
+
+    private static func hasMatchingWindows(
+        _ candidate: QuotaSnapshot,
+        _ reference: QuotaSnapshot
+    ) -> Bool {
+        guard candidate.windows.count == reference.windows.count else { return false }
+        return reference.windows.allSatisfy { referenceWindow in
+            candidate.windows.contains { $0.windowMinutes == referenceWindow.windowMinutes }
+        }
+    }
+
+    private static func isNonRegressing(
+        _ candidate: QuotaSnapshot,
+        after confirmedQuota: QuotaSnapshot?
+    ) -> Bool {
+        guard let confirmedQuota else { return true }
+        guard hasMatchingWindows(candidate, confirmedQuota) else { return false }
+
+        for confirmedWindow in confirmedQuota.windows {
+            guard let candidateWindow = candidate.windows.first(where: {
+                $0.windowMinutes == confirmedWindow.windowMinutes
+            }) else { return false }
+
+            if confirmsNewReset(candidateWindow, after: confirmedWindow) {
+                continue
+            }
+
+            guard candidateWindow.resetsAt == confirmedWindow.resetsAt,
+                  candidateWindow.usedPercent >= confirmedWindow.usedPercent
+            else { return false }
+        }
+        return true
+    }
+
+    private static func confirmsNewReset(
+        _ candidate: QuotaWindow,
+        after confirmed: QuotaWindow
+    ) -> Bool {
+        guard let candidateReset = candidate.resetsAt,
+              let confirmedReset = confirmed.resetsAt
+        else { return false }
+        return candidateReset > confirmedReset
     }
 
     private static func freshLocalQuota(
@@ -430,10 +536,12 @@ final class DashboardViewModel: ObservableObject {
     ) -> QuotaSnapshot? {
         guard let localAt = localSnapshot.quotaAt else { return nil }
         let localAge = capturedAt.timeIntervalSince(localAt)
-        guard localAge >= -30,
+        guard localAge >= 0,
               localAge <= maximumLocalQuotaAge,
-              localSnapshot.fiveHourQuota != nil,
-              localSnapshot.weeklyQuota != nil
+              let fiveHourQuota = localSnapshot.fiveHourQuota,
+              let weeklyQuota = localSnapshot.weeklyQuota,
+              fiveHourQuota.resetsAt != nil,
+              weeklyQuota.resetsAt != nil
         else { return nil }
         return QuotaSnapshot(at: localAt, windows: localSnapshot.quotas)
     }
@@ -459,9 +567,12 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
-    private static func loadWebQuotaCache(_ defaults: UserDefaults) -> QuotaSnapshot? {
+    private static func loadQuotaCache(
+        _ defaults: UserDefaults,
+        forKey key: String
+    ) -> QuotaSnapshot? {
         guard
-            let value = defaults.dictionary(forKey: webQuotaCacheKey),
+            let value = defaults.dictionary(forKey: key),
             let at = number(value["at"]), at > 0,
             let rawWindows = value["windows"] as? [[String: Any]]
         else { return nil }
@@ -480,14 +591,17 @@ final class DashboardViewModel: ObservableObject {
             at: Date(timeIntervalSince1970: at), windows: windows)
     }
 
-    private static func saveWebQuotaCache(_ snapshot: QuotaSnapshot) {
+    private static func saveQuotaCache(
+        _ snapshot: QuotaSnapshot,
+        forKey key: String
+    ) {
         let windows: [[String: Any]] = snapshot.windows.map { quota in
             ["minutes": quota.windowMinutes, "used": quota.usedPercent,
              "reset": quota.resetsAt?.timeIntervalSince1970 ?? 0]
         }
         UserDefaults.standard.set(
             ["at": snapshot.at.timeIntervalSince1970, "windows": windows],
-            forKey: webQuotaCacheKey)
+            forKey: key)
     }
 
     private static func number(_ value: Any?) -> Double? {
