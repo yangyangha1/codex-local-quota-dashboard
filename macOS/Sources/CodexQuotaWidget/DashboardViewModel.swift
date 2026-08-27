@@ -60,6 +60,7 @@ final class DashboardViewModel: ObservableObject {
     private var refreshQueued = false
     private var nextWebQuotaCheckAt = Date.distantPast
     private var lastWebQuota: QuotaSnapshot?
+    private var lastResolvedQuota: QuotaSnapshot?
 
     private static let themeKey = "CodexQuotaWidget.theme"
     private static let transparencyKey = "CodexQuotaWidget.backgroundTransparency"
@@ -67,6 +68,13 @@ final class DashboardViewModel: ObservableObject {
     private static let webQuotaEnabledKey = "CodexQuotaWidget.webQuotaEnabled"
     private static let webQuotaCacheKey = "CodexQuotaWidget.webQuotaSnapshot"
     private static let topMostDefaultMigrationKey = "CodexQuotaWidget.topMost.default.v2"
+    private static let webQuotaRefreshInterval: TimeInterval = 10 * 60
+    private static let maximumWebQuotaAge: TimeInterval = 15 * 60
+    private static let maximumLocalQuotaAge: TimeInterval = 5 * 60
+    private static let localQuotaBacktrackTolerance = 1.0
+    private static let localQuotaMinimumDriftTolerance = 2.5
+    private static let localQuotaDriftPerMinute = 1.5
+    private static let localQuotaMaximumDriftTolerance = 15.0
 
     init() {
         let defaults = UserDefaults.standard
@@ -319,26 +327,115 @@ final class DashboardViewModel: ObservableObject {
         _ localSnapshot: UsageSnapshot,
         capturedAt: Date
     ) async -> UsageSnapshot {
-        // While enabled, a web response is authoritative. Failed requests
-        // keep the last good snapshot instead of letting incomplete local
-        // rate_limits records make the quota graph jump backwards.
-        if webQuotaEnabled && capturedAt >= nextWebQuotaCheckAt {
-            nextWebQuotaCheckAt = capturedAt.addingTimeInterval(10 * 60)
+        // Turning the web query off must immediately restore the local
+        // snapshot instead of continuing to display a persisted web cache.
+        guard webQuotaEnabled else {
+            lastResolvedQuota = nil
+            return localSnapshot
+        }
+
+        var webRequestFailed = false
+        if capturedAt >= nextWebQuotaCheckAt {
+            nextWebQuotaCheckAt = capturedAt.addingTimeInterval(Self.webQuotaRefreshInterval)
             if let webSnapshot = await WebQuotaClient.fetch() {
                 lastWebQuota = webSnapshot
                 Self.saveWebQuotaCache(webSnapshot)
+                lastResolvedQuota = webSnapshot
+                return Self.replacingQuota(in: localSnapshot, with: webSnapshot)
             }
+            webRequestFailed = true
         }
-        guard let quota = lastWebQuota else {
-            return UsageSnapshot(
-                today: localSnapshot.today, week: localSnapshot.week,
-                month: localSnapshot.month, weekSessions: localSnapshot.weekSessions,
-                quotaAt: nil, quotas: [], projects: localSnapshot.projects)
+
+        // If this web refresh failed, a fresh complete local snapshot is the
+        // authority for the interval. It is safer than presenting a stale web
+        // value, but incomplete local data is still rejected below.
+        if webRequestFailed,
+           let localQuota = Self.freshLocalQuota(from: localSnapshot, capturedAt: capturedAt) {
+            lastResolvedQuota = localQuota
+            return Self.replacingQuota(in: localSnapshot, with: localQuota)
         }
+
+        guard let webQuota = lastWebQuota,
+              capturedAt.timeIntervalSince(webQuota.at) <= Self.maximumWebQuotaAge
+        else {
+            if let localQuota = Self.freshLocalQuota(from: localSnapshot, capturedAt: capturedAt) {
+                lastResolvedQuota = localQuota
+                return Self.replacingQuota(in: localSnapshot, with: localQuota)
+            }
+            if let lastResolvedQuota {
+                return Self.replacingQuota(in: localSnapshot, with: lastResolvedQuota)
+            }
+            return localSnapshot
+        }
+
+        // The local scanner supplies high-frequency quota updates while they
+        // remain fresh and consistent with the web anchor. A rejected local
+        // sample holds the last accepted value until the next web refresh,
+        // instead of bouncing the graph between sources.
+        if let localQuota = Self.trustedLocalQuota(
+            from: localSnapshot,
+            relativeTo: webQuota,
+            capturedAt: capturedAt
+        ) {
+            lastResolvedQuota = localQuota
+            return Self.replacingQuota(in: localSnapshot, with: localQuota)
+        }
+
+        let quota = lastResolvedQuota ?? webQuota
+        return Self.replacingQuota(in: localSnapshot, with: quota)
+    }
+
+    private static func replacingQuota(
+        in localSnapshot: UsageSnapshot,
+        with quota: QuotaSnapshot
+    ) -> UsageSnapshot {
         return UsageSnapshot(
             today: localSnapshot.today, week: localSnapshot.week,
             month: localSnapshot.month, weekSessions: localSnapshot.weekSessions,
             quotaAt: quota.at, quotas: quota.windows, projects: localSnapshot.projects)
+    }
+
+    private static func trustedLocalQuota(
+        from localSnapshot: UsageSnapshot,
+        relativeTo webQuota: QuotaSnapshot,
+        capturedAt: Date
+    ) -> QuotaSnapshot? {
+        guard let localQuota = freshLocalQuota(from: localSnapshot, capturedAt: capturedAt),
+              localQuota.windows.count == webQuota.windows.count
+        else { return nil }
+
+        let minutesSinceWeb = max(0, capturedAt.timeIntervalSince(webQuota.at) / 60)
+        let permittedDrift = min(
+            localQuotaMaximumDriftTolerance,
+            max(localQuotaMinimumDriftTolerance, minutesSinceWeb * localQuotaDriftPerMinute)
+        )
+
+        for webWindow in webQuota.windows {
+            guard let localWindow = localQuota.windows.first(where: {
+                $0.windowMinutes == webWindow.windowMinutes
+            }) else { return nil }
+
+            let usedDifference = localWindow.usedPercent - webWindow.usedPercent
+            guard usedDifference >= -localQuotaBacktrackTolerance,
+                  abs(usedDifference) <= permittedDrift
+            else { return nil }
+        }
+
+        return localQuota
+    }
+
+    private static func freshLocalQuota(
+        from localSnapshot: UsageSnapshot,
+        capturedAt: Date
+    ) -> QuotaSnapshot? {
+        guard let localAt = localSnapshot.quotaAt else { return nil }
+        let localAge = capturedAt.timeIntervalSince(localAt)
+        guard localAge >= -30,
+              localAge <= maximumLocalQuotaAge,
+              localSnapshot.fiveHourQuota != nil,
+              localSnapshot.weeklyQuota != nil
+        else { return nil }
+        return QuotaSnapshot(at: localAt, windows: localSnapshot.quotas)
     }
 
     private func apply(snapshot: UsageSnapshot, capturedAt: Date) {
