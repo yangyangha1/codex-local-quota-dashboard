@@ -123,6 +123,7 @@ namespace CodexLocalDashboard
         private volatile bool webQuotaEnabled = WebQuotaPreferences.Load();
         private DateTimeOffset nextWebQuotaCheckAt = DateTimeOffset.MinValue;
         private QuotaSnapshot lastWebQuota = WebQuotaCache.Load();
+        private bool lastWebQuotaRequestFailed;
         private ThemeMode CurrentTheme { get { return (ThemeMode)themeModeValue; } }
         private static readonly uint OwnProcessId = unchecked((uint)Process.GetCurrentProcess().Id);
         private static int detailMemoryCleanupPending;
@@ -563,8 +564,11 @@ namespace CodexLocalDashboard
 
         private UsageSnapshot ResolveQuotaSource(UsageSnapshot localSnapshot)
         {
-            // This runs on the serial refresh worker. A failed request keeps
-            // the last web snapshot and never falls back to stale JSONL quota.
+            if (!webQuotaEnabled) return localSnapshot;
+
+            // Web is the source of truth. Between successful web requests a
+            // current, complete local snapshot may update the display only
+            // when it agrees with the web baseline closely enough.
             var now = DateTimeOffset.Now;
             if (webQuotaEnabled && now >= nextWebQuotaCheckAt)
             {
@@ -574,11 +578,19 @@ namespace CodexLocalDashboard
                 {
                     lastWebQuota = webSnapshot;
                     WebQuotaCache.Save(webSnapshot);
+                    lastWebQuotaRequestFailed = false;
                 }
+                else lastWebQuotaRequestFailed = true;
             }
 
-            // Disabling queries stops network traffic; it does not grant local
-            // JSONL rate_limits permission to replace the web quota cache.
+            // If the web request fails, local logs become the active source
+            // until the next successful web response restores web priority.
+            if (lastWebQuotaRequestFailed) return localSnapshot;
+
+            if (IsTrustedLocalQuota(localSnapshot, lastWebQuota, now))
+                return WithQuota(localSnapshot, new QuotaSnapshot(
+                    localSnapshot.QuotaAt, localSnapshot.Quotas));
+
             var quota = lastWebQuota;
             return new UsageSnapshot(
                 localSnapshot.Today, localSnapshot.Week, localSnapshot.Month,
@@ -586,6 +598,47 @@ namespace CodexLocalDashboard
                 quota == null ? DateTimeOffset.MinValue : quota.At,
                 quota == null ? new List<QuotaWindow>() : quota.Windows,
                 localSnapshot.Projects);
+        }
+
+        private static UsageSnapshot WithQuota(UsageSnapshot source,
+            QuotaSnapshot quota)
+        {
+            return new UsageSnapshot(source.Today, source.Week, source.Month,
+                source.WeekSessions, quota.At, quota.Windows, source.Projects);
+        }
+
+        private static bool IsTrustedLocalQuota(UsageSnapshot local,
+            QuotaSnapshot webBaseline, DateTimeOffset now)
+        {
+            var fiveHour = local.FiveHourQuota;
+            var weekly = local.WeeklyQuota;
+            if (fiveHour == null || weekly == null ||
+                fiveHour.ResetsAt == null || weekly.ResetsAt == null ||
+                local.QuotaAt == DateTimeOffset.MinValue ||
+                now - local.QuotaAt > TimeSpan.FromMinutes(3)) return false;
+
+            // The expected windows are explicit, so a changed or partial log
+            // schema cannot masquerade as a valid dual-quota reading.
+            if (Math.Abs(fiveHour.WindowMinutes - 300) > 15 ||
+                Math.Abs(weekly.WindowMinutes - 10080) > 120) return false;
+
+            if (webBaseline == null) return true;
+            var webFiveHour = webBaseline.Windows.Where(window =>
+                window != null && Math.Abs(window.WindowMinutes - 300) <= 15)
+                .FirstOrDefault();
+            var webWeekly = webBaseline.Windows.Where(window =>
+                window != null && Math.Abs(window.WindowMinutes - 10080) <= 120)
+                .FirstOrDefault();
+            if (webFiveHour == null || webWeekly == null ||
+                webFiveHour.ResetsAt == null || webWeekly.ResetsAt == null)
+                return false;
+
+            return Math.Abs(fiveHour.UsedPercent - webFiveHour.UsedPercent) <= 8d &&
+                Math.Abs(weekly.UsedPercent - webWeekly.UsedPercent) <= 4d &&
+                Math.Abs((fiveHour.ResetsAt.Value - webFiveHour.ResetsAt.Value)
+                    .TotalMinutes) <= 10d &&
+                Math.Abs((weekly.ResetsAt.Value - webWeekly.ResetsAt.Value)
+                    .TotalMinutes) <= 30d;
         }
 
         private void SetWebQuotaEnabled(bool enabled)
