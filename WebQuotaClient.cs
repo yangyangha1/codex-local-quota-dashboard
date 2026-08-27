@@ -166,7 +166,9 @@ namespace CodexLocalDashboard
                 var windows = new List<QuotaWindow>();
                 AddWindow(limits == null ? null : limits.PrimaryWindow, windows);
                 AddWindow(limits == null ? null : limits.SecondaryWindow, windows);
-                if (windows.Count == 0) return false;
+                // A one-window response is not a usable quota baseline.  It
+                // must not displace a complete local or prior web snapshot.
+                if (!HasExpectedQuotaWindows(windows)) return false;
                 snapshot = new QuotaSnapshot(DateTimeOffset.Now, windows);
                 return true;
             }
@@ -188,6 +190,15 @@ namespace CodexLocalDashboard
             windows.Add(new QuotaWindow(
                 (int)Math.Min(int.MaxValue, Math.Max(1, source.LimitWindowSeconds / 60)),
                 Math.Max(0d, Math.Min(100d, source.UsedPercent)), reset));
+        }
+
+        private static bool HasExpectedQuotaWindows(List<QuotaWindow> windows)
+        {
+            return windows != null && windows.Any(window => window != null &&
+                Math.Abs(window.WindowMinutes - 300) <= 15 &&
+                window.ResetsAt != null) && windows.Any(window =>
+                window != null && Math.Abs(window.WindowMinutes - 10080) <=
+                120 && window.ResetsAt != null);
         }
 
         private static T Deserialize<T>(string json) where T : class

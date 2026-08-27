@@ -5,6 +5,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
     <AssemblyName>CodexLocalDashboard-v1.7.0</AssemblyName>
     <RootNamespace>CodexLocalDashboard</RootNamespace>
     <ApplicationIcon>dashboard.ico</ApplicationIcon>

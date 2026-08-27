@@ -123,6 +123,12 @@ namespace CodexLocalDashboard
         private volatile bool webQuotaEnabled = WebQuotaPreferences.Load();
         private DateTimeOffset nextWebQuotaCheckAt = DateTimeOffset.MinValue;
         private QuotaSnapshot lastWebQuota = WebQuotaCache.Load();
+        // Local events are retained only after they have passed the same
+        // monotonic-reset rules as display data.  This prevents a delayed or
+        // malformed log event from making either quota line move backwards.
+        private QuotaSnapshot lastTrustedLocalQuota;
+        private QuotaSnapshot lastAcceptedQuota;
+        private QuotaSnapshot lastWebCompatibleLocalQuota;
         private bool lastWebQuotaRequestFailed;
         private ThemeMode CurrentTheme { get { return (ThemeMode)themeModeValue; } }
         private static readonly uint OwnProcessId = unchecked((uint)Process.GetCurrentProcess().Id);
@@ -564,51 +570,92 @@ namespace CodexLocalDashboard
 
         private UsageSnapshot ResolveQuotaSource(UsageSnapshot localSnapshot)
         {
-            if (!webQuotaEnabled) return localSnapshot;
-
-            // Web is the source of truth. Between successful web requests a
-            // current, complete local snapshot may update the display only
-            // when it agrees with the web baseline closely enough.
             var now = DateTimeOffset.Now;
+            var localQuota = IsCompleteLocalQuota(localSnapshot, now)
+                ? new QuotaSnapshot(localSnapshot.QuotaAt,
+                    localSnapshot.Quotas) : null;
+            if (localQuota != null)
+                lastTrustedLocalQuota = PromoteQuota(lastTrustedLocalQuota,
+                    localQuota);
+
+            // With web lookup disabled, no request or cached web response is
+            // used.  A local value must still be newer than the displayed
+            // value and may not make a quota rise without a new reset_at.
+            if (!webQuotaEnabled)
+                return WithLocalFallback(localSnapshot);
+
+            // A successful web response is the authoritative baseline.
             if (webQuotaEnabled && now >= nextWebQuotaCheckAt)
             {
                 nextWebQuotaCheckAt = now.AddMinutes(10);
                 QuotaSnapshot webSnapshot;
                 if (WebQuotaClient.TryRead(out webSnapshot))
                 {
-                    lastWebQuota = webSnapshot;
-                    WebQuotaCache.Save(webSnapshot);
+                    lastWebQuota = PromoteQuota(lastWebQuota, webSnapshot);
+                    WebQuotaCache.Save(lastWebQuota);
                     lastWebQuotaRequestFailed = false;
                 }
                 else lastWebQuotaRequestFailed = true;
             }
 
-            // If the web request fails, local logs become the active source
-            // until the next successful web response restores web priority.
-            if (lastWebQuotaRequestFailed) return localSnapshot;
+            // A failed request is deliberately silent.  Use local data only
+            // when it is complete and can advance the accepted snapshot; an
+            // incomplete local event leaves the last good web value intact.
+            if (lastWebQuotaRequestFailed)
+                return WithLocalFallback(localSnapshot, true);
 
-            if (IsTrustedLocalQuota(localSnapshot, lastWebQuota, now))
-                return WithQuota(localSnapshot, new QuotaSnapshot(
-                    localSnapshot.QuotaAt, localSnapshot.Quotas));
+            // Between web polls, local logs may provide a higher-frequency
+            // value only after the web baseline and only while the two agree.
+            if (localQuota != null && IsTrustedLocalSupplement(localQuota,
+                lastWebQuota))
+            {
+                lastWebCompatibleLocalQuota = PromoteQuota(
+                    lastWebCompatibleLocalQuota, localQuota);
+                lastAcceptedQuota = PromoteQuota(lastAcceptedQuota,
+                    lastWebCompatibleLocalQuota);
+                return WithQuota(localSnapshot, lastAcceptedQuota);
+            }
 
-            var quota = lastWebQuota;
-            return new UsageSnapshot(
-                localSnapshot.Today, localSnapshot.Week, localSnapshot.Month,
-                localSnapshot.WeekSessions,
-                quota == null ? DateTimeOffset.MinValue : quota.At,
-                quota == null ? new List<QuotaWindow>() : quota.Windows,
-                localSnapshot.Projects);
+            lastAcceptedQuota = PromoteQuota(lastAcceptedQuota,
+                lastWebQuota);
+            return WithQuota(localSnapshot, lastAcceptedQuota);
+        }
+
+        private UsageSnapshot WithLocalFallback(UsageSnapshot source,
+            bool mustContinueFromWebBaseline = false)
+        {
+            var localQuota = lastTrustedLocalQuota;
+            if (mustContinueFromWebBaseline)
+            {
+                if (lastWebCompatibleLocalQuota == null)
+                {
+                    if (!IsTrustedLocalSupplement(localQuota, lastWebQuota))
+                        localQuota = null;
+                    else lastWebCompatibleLocalQuota = CloneQuota(localQuota);
+                }
+                else
+                {
+                    lastWebCompatibleLocalQuota = PromoteQuota(
+                        lastWebCompatibleLocalQuota, localQuota);
+                    localQuota = lastWebCompatibleLocalQuota;
+                }
+            }
+            lastAcceptedQuota = PromoteQuota(lastAcceptedQuota, localQuota);
+            return WithQuota(source, lastAcceptedQuota);
         }
 
         private static UsageSnapshot WithQuota(UsageSnapshot source,
             QuotaSnapshot quota)
         {
             return new UsageSnapshot(source.Today, source.Week, source.Month,
-                source.WeekSessions, quota.At, quota.Windows, source.Projects);
+                source.WeekSessions,
+                quota == null ? DateTimeOffset.MinValue : quota.At,
+                quota == null ? new List<QuotaWindow>() : quota.Windows,
+                source.Projects);
         }
 
-        private static bool IsTrustedLocalQuota(UsageSnapshot local,
-            QuotaSnapshot webBaseline, DateTimeOffset now)
+        private static bool IsCompleteLocalQuota(UsageSnapshot local,
+            DateTimeOffset now)
         {
             var fiveHour = local.FiveHourQuota;
             var weekly = local.WeeklyQuota;
@@ -622,23 +669,108 @@ namespace CodexLocalDashboard
             if (Math.Abs(fiveHour.WindowMinutes - 300) > 15 ||
                 Math.Abs(weekly.WindowMinutes - 10080) > 120) return false;
 
-            if (webBaseline == null) return true;
-            var webFiveHour = webBaseline.Windows.Where(window =>
-                window != null && Math.Abs(window.WindowMinutes - 300) <= 15)
-                .FirstOrDefault();
-            var webWeekly = webBaseline.Windows.Where(window =>
-                window != null && Math.Abs(window.WindowMinutes - 10080) <= 120)
-                .FirstOrDefault();
-            if (webFiveHour == null || webWeekly == null ||
-                webFiveHour.ResetsAt == null || webWeekly.ResetsAt == null)
-                return false;
+            return true;
+        }
 
-            return Math.Abs(fiveHour.UsedPercent - webFiveHour.UsedPercent) <= 8d &&
-                Math.Abs(weekly.UsedPercent - webWeekly.UsedPercent) <= 4d &&
-                Math.Abs((fiveHour.ResetsAt.Value - webFiveHour.ResetsAt.Value)
-                    .TotalMinutes) <= 10d &&
-                Math.Abs((weekly.ResetsAt.Value - webWeekly.ResetsAt.Value)
-                    .TotalMinutes) <= 30d;
+        private static bool IsTrustedLocalSupplement(QuotaSnapshot local,
+            QuotaSnapshot webBaseline)
+        {
+            if (webBaseline == null) return true;
+            if (local.At <= webBaseline.At) return false;
+            var localFiveHour = FindQuotaWindow(local, 300, 15);
+            var localWeekly = FindQuotaWindow(local, 10080, 120);
+            var webFiveHour = FindQuotaWindow(webBaseline, 300, 15);
+            var webWeekly = FindQuotaWindow(webBaseline, 10080, 120);
+            return IsTrustedWindowSupplement(localFiveHour, webFiveHour, 8d) &&
+                IsTrustedWindowSupplement(localWeekly, webWeekly, 4d);
+        }
+
+        private static bool IsTrustedWindowSupplement(QuotaWindow local,
+            QuotaWindow web, double maximumAdvance)
+        {
+            if (local == null || web == null || local.ResetsAt == null ||
+                web.ResetsAt == null) return false;
+            if (HasConfirmedNewReset(local, web)) return true;
+            if (!SameReset(local, web)) return false;
+            return local.UsedPercent + .01d >= web.UsedPercent &&
+                local.UsedPercent - web.UsedPercent <= maximumAdvance;
+        }
+
+        private static QuotaSnapshot PromoteQuota(QuotaSnapshot current,
+            QuotaSnapshot candidate)
+        {
+            if (!IsCompleteQuota(candidate)) return current;
+            if (current == null || !IsCompleteQuota(current))
+                return CloneQuota(candidate);
+            if (candidate.At <= current.At) return current;
+
+            var candidateFiveHour = FindQuotaWindow(candidate, 300, 15);
+            var candidateWeekly = FindQuotaWindow(candidate, 10080, 120);
+            var currentFiveHour = FindQuotaWindow(current, 300, 15);
+            var currentWeekly = FindQuotaWindow(current, 10080, 120);
+            return new QuotaSnapshot(candidate.At, new List<QuotaWindow>
+            {
+                AdvanceWindow(currentFiveHour, candidateFiveHour),
+                AdvanceWindow(currentWeekly, candidateWeekly)
+            });
+        }
+
+        private static QuotaWindow AdvanceWindow(QuotaWindow current,
+            QuotaWindow candidate)
+        {
+            if (current == null) return CloneWindow(candidate);
+            if (candidate == null) return CloneWindow(current);
+            if (HasConfirmedNewReset(candidate, current) ||
+                (SameReset(candidate, current) && candidate.UsedPercent +
+                    .01d >= current.UsedPercent))
+                return CloneWindow(candidate);
+            return CloneWindow(current);
+        }
+
+        private static bool IsCompleteQuota(QuotaSnapshot quota)
+        {
+            var fiveHour = FindQuotaWindow(quota, 300, 15);
+            var weekly = FindQuotaWindow(quota, 10080, 120);
+            return fiveHour != null && weekly != null &&
+                fiveHour.ResetsAt != null && weekly.ResetsAt != null;
+        }
+
+        private static QuotaWindow FindQuotaWindow(QuotaSnapshot quota,
+            int expectedMinutes, int toleranceMinutes)
+        {
+            return quota == null || quota.Windows == null ? null :
+                quota.Windows.Where(window => window != null &&
+                    Math.Abs(window.WindowMinutes - expectedMinutes) <=
+                        toleranceMinutes).FirstOrDefault();
+        }
+
+        private static bool SameReset(QuotaWindow left, QuotaWindow right)
+        {
+            return left != null && right != null && left.ResetsAt != null &&
+                right.ResetsAt != null && Math.Abs((left.ResetsAt.Value -
+                    right.ResetsAt.Value).TotalSeconds) <= 60d;
+        }
+
+        private static bool HasConfirmedNewReset(QuotaWindow candidate,
+            QuotaWindow current)
+        {
+            return candidate != null && current != null &&
+                candidate.ResetsAt != null && current.ResetsAt != null &&
+                candidate.ResetsAt.Value > current.ResetsAt.Value
+                    .AddMinutes(1);
+        }
+
+        private static QuotaSnapshot CloneQuota(QuotaSnapshot source)
+        {
+            return source == null ? null : new QuotaSnapshot(source.At,
+                (source.Windows ?? new List<QuotaWindow>()).Select(CloneWindow)
+                    .Where(window => window != null).ToList());
+        }
+
+        private static QuotaWindow CloneWindow(QuotaWindow source)
+        {
+            return source == null ? null : new QuotaWindow(source.WindowMinutes,
+                source.UsedPercent, source.ResetsAt);
         }
 
         private void SetWebQuotaEnabled(bool enabled)
@@ -3094,8 +3226,21 @@ namespace CodexLocalDashboard
             if (rateLimits != null && at > (state.LatestQuota == null ? DateTimeOffset.MinValue : state.LatestQuota.At))
             {
                 var windows = new List<QuotaWindow>(); AddQuota(rateLimits, "primary", windows); AddQuota(rateLimits, "secondary", windows);
-                if (windows.Count > 0) state.LatestQuota = new QuotaSnapshot(at, windows);
+                // Codex can emit a partial rate_limits event while a response
+                // is still being written.  Do not let one such event replace
+                // an earlier, complete 5H + 7d snapshot for this session.
+                if (HasExpectedQuotaWindows(windows))
+                    state.LatestQuota = new QuotaSnapshot(at, windows);
             }
+        }
+
+        private static bool HasExpectedQuotaWindows(
+            List<QuotaWindow> windows)
+        {
+            return windows != null && windows.Any(window => window != null &&
+                Math.Abs(window.WindowMinutes - 300) <= 15) &&
+                windows.Any(window => window != null &&
+                    Math.Abs(window.WindowMinutes - 10080) <= 120);
         }
 
         private static void ParseSessionMeta(IDictionary<string, object> payload,
